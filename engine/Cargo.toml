@@ -1,0 +1,30 @@
+[package]
+name = "keel-engine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "keel"
+path = "src/main.rs"
+
+# Versions are the spec's known-good minimums (SPEC.md §3). Rule 5: if one stops
+# resolving, bump to latest stable and note it in status.md.
+[dependencies]
+wasmtime = { version = "43", features = ["component-model"] }
+# FALLBACK: if "component-model" is rejected as unknown, it is on by default
+# in this wasmtime version — remove the features list.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+axum = { version = "0.8", features = ["multipart"] }   # multipart needed for the
+                                                        # phase-2 module upload form
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+ureq = { version = "2", features = ["tls"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+askama = "0.12"          # phase 2 (templates); unused until Task 2.8
+tracing = "0.1"
+tracing-subscriber = "0.3"
