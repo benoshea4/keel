@@ -4,3 +4,5 @@ target/
 *.db-wal
 engine.log
 .DS_Store
+# accept_phase3.sh copies the two counter artifacts here
+guests/counter/counter-v?.wasm
