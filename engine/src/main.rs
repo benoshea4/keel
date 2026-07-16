@@ -16,6 +16,7 @@ mod api;
 mod db;
 mod host;
 mod journal;
+mod notifier;
 mod runner;
 
 use std::sync::Arc;
