@@ -79,7 +79,6 @@ impl Notifier {
 
     /// PHASE 3: the upgrade handler MUST call this on every failure exit path, or
     /// the workflow zombifies at its next park (SPEC.md troubleshooting table).
-    #[allow(dead_code)] // wired up by PHASE 3 Task 3.6 — remove this allow then
     pub fn clear_abort(&self, id: &str) {
         self.aborts.lock().unwrap().remove(id);
     }

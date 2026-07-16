@@ -23,7 +23,7 @@ use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::Store;
 
 use crate::db;
-use crate::host::{Ctx, Workflow};
+use crate::host::{AbortForUpgrade, Ctx, Workflow};
 use crate::journal::JournalCtx;
 use crate::notifier::Notifier;
 
@@ -45,6 +45,12 @@ pub struct EngineShared {
     max_running: u32,
     running: Mutex<u32>,
     running_cv: Condvar,
+    /// Task 3.5 — live workflow threads, so the upgrade handler (3.6) can join a
+    /// parked worker after set_abort. Inserted by spawn(), removed by the thread
+    /// itself on every exit path. Benign race: a thread that finishes before
+    /// spawn()'s insert leaves a finished handle behind — joining it later
+    /// returns instantly, and a respawn of the same id overwrites it.
+    threads: Mutex<HashMap<String, std::thread::JoinHandle<()>>>,
 }
 
 impl EngineShared {
@@ -62,6 +68,7 @@ impl EngineShared {
             max_running: max_running.max(1), // 0 would deadlock every spawn
             running: Mutex::new(0),
             running_cv: Condvar::new(),
+            threads: Mutex::new(HashMap::new()),
         })
     }
 
@@ -104,10 +111,14 @@ impl Drop for Permit {
     }
 }
 
-/// Threads are DETACHED on purpose: the journal (not thread lifecycle) is what makes
-/// crashes safe — kill -9 at any instant is a supported shutdown (SPEC.md §0 rule 3).
+/// Threads are registered (Task 3.5) but never joined in normal operation — the
+/// journal (not thread lifecycle) is what makes crashes safe; kill -9 at any
+/// instant is a supported shutdown (SPEC.md §0 rule 3). Only the upgrade handler
+/// joins, after set_abort.
 pub fn spawn(shared: Arc<EngineShared>, workflow_id: String) {
-    std::thread::spawn(move || {
+    let registry_shared = shared.clone();
+    let registry_id = workflow_id.clone();
+    let handle = std::thread::spawn(move || {
         // Task 2.7 — the cap blocks HERE, inside the spawned thread: creation and
         // recovery never stall on it; over-cap workflows just sit as idle threads
         // until a permit frees up.
@@ -121,7 +132,15 @@ pub fn spawn(shared: Arc<EngineShared>, workflow_id: String) {
                 let _ = db::set_status(&c, &workflow_id, "failed", Some(&format!("runner error: {e:#}")));
             }
         }
+        // Task 3.5 — the thread removes ITSELF on every exit path (completed,
+        // failed, aborted-for-upgrade, runner error).
+        shared.threads.lock().unwrap().remove(&workflow_id);
     });
+    registry_shared
+        .threads
+        .lock()
+        .unwrap()
+        .insert(registry_id, handle);
 }
 
 fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
@@ -186,10 +205,23 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
     match result {
         Ok(Ok(json)) => db::set_status(&conn, id, "completed", Some(&json))?,
         Ok(Err(apperr)) => db::set_status(&conn, id, "failed", Some(&apperr))?,
-        // Traps include journaled()'s "nondeterministic replay at seq N" bail — the
-        // message survives into `output` via {:#}. PHASE 3 (Task 3.5): check for the
-        // AbortForUpgrade sentinel FIRST here, before marking anything failed.
-        Err(trap) => db::set_status(&conn, id, "failed", Some(&format!("trap: {trap:#}")))?,
+        Err(trap) => {
+            // Task 3.5 — check the AbortForUpgrade sentinel FIRST: the upgrade
+            // handler yanked this parked worker on purpose. Exit silently, status
+            // untouched (still sleeping/waiting_event); the handler owns what
+            // happens next. Walking the whole chain (not just root_cause) survives
+            // however wasmtime::Error ↔ anyhow::Error wrapping nests the source.
+            let e = anyhow::Error::from(trap);
+            if e.chain()
+                .any(|c| c.downcast_ref::<AbortForUpgrade>().is_some())
+            {
+                shared.notifier.clear_abort(id);
+                return Ok(());
+            }
+            // Other traps include journaled()'s "nondeterministic replay at seq N"
+            // bail — the message survives into `output` via {:#}.
+            db::set_status(&conn, id, "failed", Some(&format!("trap: {e:#}")))?
+        }
     }
     Ok(())
 }
