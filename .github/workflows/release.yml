@@ -23,6 +23,9 @@ permissions:
 jobs:
   binaries:
     strategy:
+      # One target's upload flake must never cancel a sibling mid-compile
+      # (it did, 2026-07-16: an x86_64 422 cancelled the macOS build).
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -97,6 +100,15 @@ jobs:
               if gh api --method POST -H "Content-Type: application/octet-stream" \
                   "https://uploads.github.com/repos/$REPO/releases/$RELID/assets?name=$f" \
                   --input "$f" >/dev/null; then
+                ok=1; break
+              fi
+              # A 422 usually means the asset already exists and the delete
+              # lookup above flaked. Same tag = same source = same artifact:
+              # if the name is present now, the mission is accomplished.
+              AID=$(gh api "repos/$REPO/releases/$RELID/assets?per_page=100" \
+                --jq ".[] | select(.name==\"$f\") | .id" 2>/dev/null | head -1) || true
+              if [ -n "$AID" ]; then
+                echo "$f already present on the release — treating as uploaded"
                 ok=1; break
               fi
               echo "upload of $f attempt $i failed; retrying in 30s"; sleep 30
