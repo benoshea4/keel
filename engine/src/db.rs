@@ -15,8 +15,8 @@
 // auditable in one place — with ONE deliberate exception: journal.rs, whose
 // journaled() core the spec fixes verbatim (§6).
 //
-// PHASE 2 (Task 2.2) APPENDS the `timers` and `events` tables to MIGRATION below —
-// append, never ALTER. PHASE 3 (Task 3.2) appends `snapshots`.
+// PHASE 3 (Task 3.2) APPENDS the `snapshots` table to MIGRATION below —
+// append, never ALTER.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
@@ -58,6 +58,27 @@ CREATE TABLE IF NOT EXISTS journal (
     response    TEXT NOT NULL,             -- JSON per SPEC.md §4.2
     created_at  INTEGER NOT NULL,
     PRIMARY KEY (workflow_id, seq)
+);
+
+-- Task 2.2 additions (appended, never ALTERed).
+
+CREATE TABLE IF NOT EXISTS timers (
+    workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+    seq         INTEGER NOT NULL,
+    wake_at     INTEGER NOT NULL            -- unix millis; FIXED once written
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id   TEXT NOT NULL REFERENCES workflows(id),
+    name          TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    delivered     INTEGER NOT NULL DEFAULT 0,
+    delivered_seq INTEGER,                  -- journal seq that consumed this event;
+                                            -- REQUIRED so a phase-3 upgrade can
+                                            -- un-deliver events whose journal rows
+                                            -- fall in the discarded tail
+    created_at    INTEGER NOT NULL
 );
 ";
 
