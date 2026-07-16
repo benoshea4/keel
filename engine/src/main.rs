@@ -8,9 +8,8 @@
 // included) is safe because every effect commits to the journal before its result
 // reaches the guest (SPEC.md §0 rule 3). Ctrl-C just stops the listener and exits.
 //
-// PHASE 2 (Task 2.7): --max-running N (default 256) lands on the Serve command, with
-// the >80%-permits-held starvation warning at startup. PHASE 2 (Task 2.8): ui.rs
-// routes + /assets/* + a build.rs asserting assets/htmx.min.js exists.
+// PHASE 2 (Task 2.8): ui.rs routes + /assets/* + a build.rs asserting
+// assets/htmx.min.js exists.
 
 mod api;
 mod db;
@@ -44,6 +43,11 @@ enum Cmd {
         /// Listen address.
         #[arg(long, default_value = "127.0.0.1:8080")]
         listen: String,
+        /// Maximum concurrently active workflow threads (Task 2.7). Parked
+        /// (sleeping/waiting-event) workflows still hold their permit — keep this
+        /// generously above your total live workflow count.
+        #[arg(long, default_value_t = 256)]
+        max_running: u32,
     },
 }
 
@@ -51,11 +55,15 @@ enum Cmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Serve { db, listen } => serve(db, listen).await,
+        Cmd::Serve {
+            db,
+            listen,
+            max_running,
+        } => serve(db, listen, max_running).await,
     }
 }
 
-async fn serve(db_path: String, listen: String) -> Result<()> {
+async fn serve(db_path: String, listen: String, max_running: u32) -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -63,12 +71,26 @@ async fn serve(db_path: String, listen: String) -> Result<()> {
     let conn = db::open_conn(&db_path)?;
     db::migrate(&conn)?;
 
-    let shared = Arc::new(runner::EngineShared::new(db_path.clone())?);
+    let shared = Arc::new(runner::EngineShared::new(db_path.clone(), max_running)?);
 
     // Task 1.4 — recovery scan. This IS the entire crash-recovery implementation:
     // start every non-terminal workflow from the beginning; the journal turns
     // re-execution into replay. There is no "replay mode" (SPEC.md §0 rule 2).
-    for id in db::resumable_ids(&conn)? {
+    let resumable = db::resumable_ids(&conn)?;
+    // Task 2.7 starvation warning: parked workflows hold permits in this design,
+    // so a recovery that nearly fills the cap starves workflow N+1 of a thread
+    // until something finishes. (>80%, in integer math: n/max > 4/5.)
+    if resumable.len() as u64 * 5 > max_running.max(1) as u64 * 4 {
+        tracing::warn!(
+            "recovering {} workflows against --max-running {}: parked (sleeping/waiting) \
+             workflows still hold permits, so new or recovered workflows beyond the cap \
+             will starve. Parked OS threads are cheap — raise --max-running well above \
+             your workflow count.",
+            resumable.len(),
+            max_running
+        );
+    }
+    for id in resumable {
         tracing::info!("recovering workflow {id}");
         runner::spawn(shared.clone(), id); // sanctioned spawn call-site 2 of 3 (§0)
     }

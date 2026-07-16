@@ -19,7 +19,7 @@
 // result match below (aborted threads exit silently, leaving status untouched).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::{Context as _, Result};
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -42,11 +42,16 @@ pub struct EngineShared {
     /// Wake-up latency optimization for parked threads + phase-3 abort flags
     /// (Task 2.3). In its own Arc so each workflow's Ctx can hold a handle.
     pub notifier: Arc<Notifier>,
-    // PHASE 2 adds: max_running permit counter (Task 2.7).
+    /// Task 2.7 — the --max-running permit counter (std has no semaphore; a
+    /// Mutex<count> + Condvar is one). A permit is held for a workflow thread's
+    /// ENTIRE life, parked included — see the starvation warning in main.rs.
+    max_running: u32,
+    running: Mutex<u32>,
+    running_cv: Condvar,
 }
 
 impl EngineShared {
-    pub fn new(db_path: String) -> Result<Self> {
+    pub fn new(db_path: String, max_running: u32) -> Result<Self> {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         Ok(EngineShared {
@@ -57,6 +62,9 @@ impl EngineShared {
                 .timeout(std::time::Duration::from_secs(30))
                 .build(),
             notifier: Arc::new(Notifier::new()),
+            max_running: max_running.max(1), // 0 would deadlock every spawn
+            running: Mutex::new(0),
+            running_cv: Condvar::new(),
         })
     }
 
@@ -76,10 +84,37 @@ impl EngineShared {
     }
 }
 
+/// Holds one --max-running permit. Released on ANY thread exit — Drop also runs
+/// during a panic unwind, so a crashed workflow can't leak its permit.
+struct Permit(Arc<EngineShared>);
+
+impl Permit {
+    fn acquire(shared: Arc<EngineShared>) -> Permit {
+        let mut n = shared.running.lock().unwrap();
+        while *n >= shared.max_running {
+            n = shared.running_cv.wait(n).unwrap();
+        }
+        *n += 1;
+        drop(n);
+        Permit(shared)
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap() -= 1;
+        self.0.running_cv.notify_all();
+    }
+}
+
 /// Threads are DETACHED on purpose: the journal (not thread lifecycle) is what makes
 /// crashes safe — kill -9 at any instant is a supported shutdown (SPEC.md §0 rule 3).
 pub fn spawn(shared: Arc<EngineShared>, workflow_id: String) {
     std::thread::spawn(move || {
+        // Task 2.7 — the cap blocks HERE, inside the spawned thread: creation and
+        // recovery never stall on it; over-cap workflows just sit as idle threads
+        // until a permit frees up.
+        let _permit = Permit::acquire(shared.clone());
         if let Err(e) = run_workflow(&shared, &workflow_id) {
             // Infrastructure failure (db unreachable, module row missing, linker
             // error...) — distinct from guest failure, which run_workflow records
