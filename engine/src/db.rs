@@ -191,6 +191,72 @@ pub fn journal_rows(c: &Connection, workflow_id: &str) -> Result<Vec<JournalRow>
     Ok(rows)
 }
 
+// --- Raw journal access (Tasks 2.4/2.5) --------------------------------------
+// journaled() (journal.rs) covers plain request→response effects. The park-loop
+// host calls (durable sleep, await-event) need the same replay check and commit
+// with WAITING in between, so they use these helpers instead of the closure
+// wrapper. The invariant is unchanged: the row commits BEFORE the result reaches
+// the guest, and the replay check happens before any effect.
+
+/// (kind, request, response) recorded at (workflow_id, seq), if any.
+pub fn get_journal_row(
+    c: &Connection,
+    workflow_id: &str,
+    seq: i64,
+) -> Result<Option<(String, String, String)>> {
+    Ok(c
+        .query_row(
+            "SELECT kind, request, response FROM journal
+             WHERE workflow_id = ?1 AND seq = ?2",
+            rusqlite::params![workflow_id, seq],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
+}
+
+pub fn insert_journal_row(
+    c: &Connection,
+    workflow_id: &str,
+    seq: i64,
+    kind: &str,
+    request: &str,
+    response: &str,
+) -> Result<()> {
+    c.execute(
+        "INSERT INTO journal (workflow_id, seq, kind, request, response, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![workflow_id, seq, kind, request, response, now_ms()],
+    )?;
+    Ok(())
+}
+
+// --- Timers (Task 2.4 durable sleep) ------------------------------------------
+
+/// The workflow's durable wake deadline, if it is (or was, pre-crash) sleeping.
+/// At most one row per workflow (PRIMARY KEY workflow_id).
+pub fn get_timer_wake_at(c: &Connection, workflow_id: &str) -> Result<Option<i64>> {
+    Ok(c
+        .query_row(
+            "SELECT wake_at FROM timers WHERE workflow_id = ?1",
+            [workflow_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+pub fn insert_timer(c: &Connection, workflow_id: &str, seq: i64, wake_at: i64) -> Result<()> {
+    c.execute(
+        "INSERT INTO timers (workflow_id, seq, wake_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![workflow_id, seq, wake_at],
+    )?;
+    Ok(())
+}
+
+pub fn delete_timer(c: &Connection, workflow_id: &str) -> Result<()> {
+    c.execute("DELETE FROM timers WHERE workflow_id = ?1", [workflow_id])?;
+    Ok(())
+}
+
 /// Task 1.4 — this query IS the recovery implementation: every non-terminal workflow
 /// simply gets started again from seq 0; the journal turns re-execution into replay.
 pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {

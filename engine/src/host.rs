@@ -8,16 +8,19 @@
 // Journal payload JSON is fixed by SPEC.md §4.2 — the field names ("ok"/"err"/"ms"/
 // "v") are part of the on-disk format; renaming them breaks replay of existing DBs.
 //
-// PHASE 2: Task 2.1 adds await-event here; Task 2.4 REPLACES sleep_ms with a durable
-// timer (park loop + `timers` table — hand-rolled, NOT via journaled()); Task 2.6
-// adds retries inside do_http_get (live path only). PHASE 3: Task 3.3 adds checkpoint.
+// PHASE 2: Task 2.5 fills in the await_event body (park loop + single-txn event
+// delivery); Task 2.6 adds retries inside do_http_get (live path only).
+// PHASE 3: Task 3.3 adds checkpoint.
 
 use std::io::Read;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use wasmtime::component::bindgen;
 
+use crate::db;
 use crate::journal::{now_ms, JournalCtx};
+use crate::notifier::Notifier;
 
 bindgen!({
     path: "../wit",           // keel/wit/workflow.wit, relative to engine/
@@ -34,8 +37,26 @@ bindgen!({
 pub struct Ctx {
     pub j: JournalCtx,
     pub http: ureq::Agent,
-    // PHASE 2 adds: notifier handle + abort flag (SPEC.md Task 2.3).
+    /// Park-loop wake-ups + the phase-3 abort flag (Task 2.3).
+    pub notifier: Arc<Notifier>,
 }
+
+/// Sentinel error the park loops (sleep_ms, await_event) bail with when the
+/// notifier's abort flag is set. Nothing sets that flag until PHASE 3: Task 3.6's
+/// upgrade endpoint sets it, and Task 3.5's runner result-match downcasts to this
+/// type (via anyhow root_cause/chain) to exit the thread WITHOUT marking the
+/// workflow failed. Defined as a real error type now so those downcasts work
+/// without reworking the loops later.
+#[derive(Debug)]
+pub struct AbortForUpgrade;
+
+impl std::fmt::Display for AbortForUpgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AbortForUpgrade")
+    }
+}
+
+impl std::error::Error for AbortForUpgrade {}
 
 /// Serializes to `{}` — the §4.2 request/response shape for parameterless calls.
 #[derive(Serialize, Deserialize)]
@@ -80,17 +101,68 @@ impl keel::workflow::host_api::Host for Ctx {
     }
 
     fn sleep_ms(&mut self, ms: u64) -> wasmtime::Result<()> {
-        // PHASE 1 semantics (documented simplification): journal only on completion.
-        // A crash mid-sleep re-runs the FULL sleep on recovery. Task 2.4 replaces
-        // this with a durable wake_at timer + park loop; do not "improve" it here.
+        // Task 2.4 — durable sleep. Hand-rolled instead of journaled() because a
+        // park loop sits between the replay check and the journal commit; the §0
+        // invariants are unchanged (replay check first, row commits before return).
+        //
+        // Durability: the FIRST arrival at this seq writes a timers row with an
+        // ABSOLUTE wake_at, then parks. kill -9 mid-sleep → recovery replays to
+        // this same seq, finds no journal row but an existing timers row, KEEPS its
+        // wake_at, and parks only for the remainder (the phase-1 full-re-sleep wart
+        // is gone). The journal row commits only on wake; a crash between the
+        // timers DELETE and that INSERT re-runs a full sleep — the documented §6
+        // at-least-once caveat.
         #[derive(Serialize)]
         struct Req {
             ms: u64,
         }
-        self.j.journaled("sleep-ms", &Req { ms }, || {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            Ok(Empty {})
-        }).map_err(trap)?;
+        let seq = self.j.next_seq;
+        self.j.next_seq += 1;
+        let id = self.j.workflow_id.clone();
+        let req_json = serde_json::to_string(&Req { ms }).map_err(|e| trap(e.into()))?;
+
+        // Replay path — the same verification journaled() performs.
+        if let Some((rkind, rreq, _)) = db::get_journal_row(&self.j.db, &id, seq).map_err(trap)? {
+            if rkind != "sleep-ms" || rreq != req_json {
+                return Err(trap(anyhow::anyhow!(
+                    "nondeterministic replay at seq {seq}: recorded ({rkind}, {rreq}) \
+                     but live code produced (sleep-ms, {req_json}). The workflow code \
+                     has diverged from its journal."
+                )));
+            }
+            return Ok(()); // recorded response is {} — nothing to surface
+        }
+
+        // Live path: get-or-create the durable deadline, then park until it passes.
+        let wake_at = match db::get_timer_wake_at(&self.j.db, &id).map_err(trap)? {
+            Some(w) => w, // restart mid-sleep: keep the original deadline
+            None => {
+                let w = now_ms() + ms as i64;
+                db::insert_timer(&self.j.db, &id, seq, w).map_err(trap)?;
+                w
+            }
+        };
+        db::set_status(&self.j.db, &id, "sleeping", None).map_err(trap)?;
+        loop {
+            if self.notifier.is_aborted(&id) {
+                return Err(trap(anyhow::Error::new(AbortForUpgrade)));
+            }
+            let remaining = wake_at - now_ms();
+            if remaining <= 0 {
+                break;
+            }
+            // 1s cap keeps the DB (via now_ms drift) re-checked even if every
+            // notify is lost — the Notifier is a latency optimization only.
+            self.notifier
+                .wait(&id, std::time::Duration::from_millis(remaining.min(1000) as u64));
+        }
+        // Final re-check: never commit completion after an abort (SPEC.md Task 2.4).
+        if self.notifier.is_aborted(&id) {
+            return Err(trap(anyhow::Error::new(AbortForUpgrade)));
+        }
+        db::delete_timer(&self.j.db, &id).map_err(trap)?;
+        db::insert_journal_row(&self.j.db, &id, seq, "sleep-ms", &req_json, "{}").map_err(trap)?;
+        db::set_status(&self.j.db, &id, "running", None).map_err(trap)?;
         Ok(())
     }
 

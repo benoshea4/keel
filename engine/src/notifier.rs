@@ -14,11 +14,6 @@
 // consult is_aborted() from day one so an upgrade can yank a parked workflow, but
 // nothing calls set_abort until phase 3.
 
-#![allow(dead_code)] // TEMPORARY (Task 2.3): every method below gains its caller in
-                     // Task 2.4 (wait, is_aborted), Task 2.5 (notify), or phase 3
-                     // (set_abort, clear_abort). When 2.4/2.5 land, replace this
-                     // file-level allow with targeted ones on the phase-3 pair.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -63,6 +58,7 @@ impl Notifier {
             .unwrap();
     }
 
+    #[allow(dead_code)] // first caller lands in Task 2.5 (POST events) — remove then
     pub fn notify(&self, id: &str) {
         let entry = self.entry(id);
         let (gen, cv) = &*entry;
@@ -72,6 +68,7 @@ impl Notifier {
 
     /// PHASE 3 (Task 3.6): flag a parked workflow so its park loop bails out with
     /// AbortForUpgrade at the next check; the notify makes "next check" be now.
+    #[allow(dead_code)] // wired up by PHASE 3 Task 3.6 — remove this allow then
     pub fn set_abort(&self, id: &str) {
         self.aborts.lock().unwrap().insert(id.to_string());
         self.notify(id);
@@ -83,6 +80,7 @@ impl Notifier {
 
     /// PHASE 3: the upgrade handler MUST call this on every failure exit path, or
     /// the workflow zombifies at its next park (SPEC.md troubleshooting table).
+    #[allow(dead_code)] // wired up by PHASE 3 Task 3.6 — remove this allow then
     pub fn clear_abort(&self, id: &str) {
         self.aborts.lock().unwrap().remove(id);
     }

@@ -6,10 +6,11 @@
 //   3. step 5 of the phase-3 upgrade handler (not built yet)
 // Adding a fourth call-site is an architecture error — don't.
 //
-// Status transitions live HERE and nowhere else (SPEC.md §5):
-//   running → completed | failed | sleeping* | waiting_event*      (* = phase 2)
-//   sleeping → running;  waiting_event → running.
-//   Terminal: completed, failed.
+// Status transitions (SPEC.md §5): the TERMINAL ones (→ completed | failed) live
+// in the result match below and nowhere else. The parked round-trips
+// (running → sleeping → running, running → waiting_event → running) live in the
+// host.rs park loops (Tasks 2.4/2.5) because they flip mid-guest-call — every
+// write still goes through db::set_status. Terminal: completed, failed.
 //
 // PHASE 2 (Task 2.7): the --max-running permit counter wraps the thread body.
 // PHASE 3 (Task 3.4): snapshot-aware start — next_seq = snapshot.journal_seq + 1 and
@@ -27,6 +28,7 @@ use wasmtime::Store;
 use crate::db;
 use crate::host::{Ctx, Workflow};
 use crate::journal::JournalCtx;
+use crate::notifier::Notifier;
 
 /// Process-wide shared state (one per `keel serve`).
 pub struct EngineShared {
@@ -37,7 +39,10 @@ pub struct EngineShared {
     components: Mutex<HashMap<String, Component>>,
     /// One process-wide Agent (Arc-backed, cheap to clone); 30s per-request timeout.
     pub http: ureq::Agent,
-    // PHASE 2 adds: notifier: Notifier, max_running permit counter.
+    /// Wake-up latency optimization for parked threads + phase-3 abort flags
+    /// (Task 2.3). In its own Arc so each workflow's Ctx can hold a handle.
+    pub notifier: Arc<Notifier>,
+    // PHASE 2 adds: max_running permit counter (Task 2.7).
 }
 
 impl EngineShared {
@@ -51,6 +56,7 @@ impl EngineShared {
             http: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
                 .build(),
+            notifier: Arc::new(Notifier::new()),
         })
     }
 
@@ -106,6 +112,7 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
             next_seq: 0,
         },
         http: shared.http.clone(),
+        notifier: shared.notifier.clone(),
     };
     let mut store = Store::new(&shared.engine, ctx);
     let instance = Workflow::instantiate(&mut store, &component, &linker)?;
