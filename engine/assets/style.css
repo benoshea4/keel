@@ -61,3 +61,14 @@ button {
   margin-top: 0.7rem;
   cursor: pointer;
 }
+
+/* API error text surfaced from hx-swap="none" forms (workflow.html). Reuses the
+ * failed-badge pair — no palette additions. */
+.error {
+  color: #a32d2d;
+  background: #fcebeb;
+  border: 1px solid #a32d2d;
+  border-radius: 2px;
+  padding: 0.4rem 0.6rem;
+  word-break: break-word;
+}

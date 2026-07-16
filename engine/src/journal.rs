@@ -86,3 +86,109 @@ pub fn now_ms() -> i64 {
         .unwrap()
         .as_millis() as i64
 }
+
+// --- Unit tests (post-review hardening) ------------------------------------------
+// The replay check and nondeterminism bail above are the engine's core safety
+// property; they must not depend on the acceptance scripts alone. Recovery is
+// simulated the way the engine really does it: same code path, next_seq reset.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize)]
+    struct Req {
+        x: u32,
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct Resp {
+        y: u32,
+    }
+
+    fn ctx() -> JournalCtx {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&db).unwrap();
+        crate::db::insert_module(&db, "h", "m", b"\0asm").unwrap();
+        crate::db::create_workflow(&db, "w", "h", "{}").unwrap();
+        JournalCtx {
+            workflow_id: "w".to_string(),
+            db,
+            next_seq: 0,
+        }
+    }
+
+    #[test]
+    fn live_records_then_replay_returns_without_rerunning_exec() {
+        let mut j = ctx();
+        let mut execs = 0;
+        let r = j
+            .journaled("t", &Req { x: 1 }, || {
+                execs += 1;
+                Ok(Resp { y: 7 })
+            })
+            .unwrap();
+        assert_eq!(r, Resp { y: 7 });
+        assert_eq!((execs, j.next_seq), (1, 1));
+
+        j.next_seq = 0; // what recovery does: same code path, counter back at 0
+        let r = j
+            .journaled("t", &Req { x: 1 }, || {
+                execs += 1;
+                Ok(Resp { y: 999 })
+            })
+            .unwrap();
+        assert_eq!(r, Resp { y: 7 }, "replay returns the RECORDED response");
+        assert_eq!(execs, 1, "exec must not re-run on replay");
+        assert_eq!(j.next_seq, 1);
+    }
+
+    #[test]
+    fn replay_with_changed_kind_is_nondeterminism() {
+        let mut j = ctx();
+        j.journaled("t", &Req { x: 1 }, || Ok(Resp { y: 7 })).unwrap();
+        j.next_seq = 0;
+        let mut ran = false;
+        let err = j
+            .journaled("other", &Req { x: 1 }, || {
+                ran = true;
+                Ok(Resp { y: 0 })
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("nondeterministic replay"), "got: {err}");
+        assert!(!ran, "exec must never run once the journal disagrees");
+    }
+
+    #[test]
+    fn replay_with_changed_request_is_nondeterminism() {
+        let mut j = ctx();
+        j.journaled("t", &Req { x: 1 }, || Ok(Resp { y: 7 })).unwrap();
+        j.next_seq = 0;
+        let mut ran = false;
+        let err = j
+            .journaled("t", &Req { x: 2 }, || {
+                ran = true;
+                Ok(Resp { y: 0 })
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("nondeterministic replay"), "got: {err}");
+        assert!(!ran);
+    }
+
+    #[test]
+    fn exec_error_journals_nothing_so_recovery_retries() {
+        let mut j = ctx();
+        let err = j
+            .journaled("t", &Req { x: 1 }, || Err::<Resp, _>(anyhow::anyhow!("boom")))
+            .unwrap_err();
+        assert!(err.to_string().contains("boom"));
+        assert!(
+            crate::db::get_journal_row(&j.db, "w", 0).unwrap().is_none(),
+            "a failed exec must not journal"
+        );
+        j.next_seq = 0; // restart retries the same seq — and this time records it
+        let r = j.journaled("t", &Req { x: 1 }, || Ok(Resp { y: 5 })).unwrap();
+        assert_eq!(r, Resp { y: 5 });
+    }
+}

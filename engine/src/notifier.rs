@@ -81,4 +81,12 @@ impl Notifier {
     pub fn clear_abort(&self, id: &str) {
         self.aborts.lock().unwrap().remove(id);
     }
+
+    /// Post-review hardening: drop a finished workflow's entry — the map
+    /// otherwise grows by one Arc per workflow, forever. The worker thread calls
+    /// this on exit. Concurrent waiters are unaffected (they hold their own Arc
+    /// clone), and a notify() after removal just re-creates a fresh entry.
+    pub fn remove_entry(&self, id: &str) {
+        self.entries.lock().unwrap().remove(id);
+    }
 }

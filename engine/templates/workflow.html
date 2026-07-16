@@ -16,6 +16,32 @@
      the phase-2 acceptance script greps this page for). #}
   <p>Module {{ module }} · id <code>{{ id }}</code></p>
 
+  {# Post-review hardening: the hx-swap="none" forms below (send event, upgrade)
+     used to swallow 4xx/5xx bodies entirely — the API's cause-and-fix error text
+     now lands here. Cleared when the next user action (post) starts; the 2s
+     polls must NOT clear it or it vanishes before it can be read. #}
+  <p id="error" class="error" hidden></p>
+  <script>
+    document.body.addEventListener('htmx:responseError', function (e) {
+      var box = document.getElementById('error');
+      box.textContent = e.detail.xhr.responseText ||
+        'request failed with status ' + e.detail.xhr.status;
+      box.hidden = false;
+    });
+    document.body.addEventListener('htmx:sendError', function () {
+      var box = document.getElementById('error');
+      box.textContent = 'engine unreachable — is keel serve still running?';
+      box.hidden = false;
+    });
+    document.body.addEventListener('htmx:beforeRequest', function (e) {
+      if (e.detail.requestConfig.verb === 'post') {
+        var box = document.getElementById('error');
+        box.hidden = true;
+        box.textContent = '';
+      }
+    });
+  </script>
+
   <div hx-get="/partials/workflows/{{ id }}" hx-trigger="every 2s" hx-swap="innerHTML">
     {% include "_workflow_detail.html" %}
   </div>

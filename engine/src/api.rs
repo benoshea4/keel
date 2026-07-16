@@ -45,6 +45,7 @@ fn content_type(req: &Request) -> String {
 /// POST /api/modules — two body shapes (Task 2.8) → {"hash": "<sha256hex>"}:
 ///   * raw wasm bytes (scripts, acceptance): POST /api/modules?name=demo
 ///   * multipart form (the modules page): fields `file` (wasm) + `name`
+///
 /// The 64MB DefaultBodyLimit lives on the route in main.rs (axum's ~2MB default
 /// rejects real components) and covers both shapes.
 pub async fn upload_module(
@@ -70,6 +71,16 @@ pub async fn upload_module(
     } else {
         Bytes::from_request(req, &()).await.map_err(bad)?
     };
+    // Post-review hardening: reject bytes that cannot be wasm at the door. The
+    // full "does it match the workflow world" check runs before anything acts on
+    // the module (workflow start fails fast; the upgrade pre-flights below) —
+    // this just stops arbitrary junk from earning a content hash and a 200.
+    if !wasm.starts_with(b"\0asm") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "not a WebAssembly binary (missing \\0asm magic) — upload a component built with cargo component".to_string(),
+        ));
+    }
     let hash = hex::encode(Sha256::digest(&wasm)); // lowercase hex, content address
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     db::insert_module(&conn, &hash, &name, &wasm).map_err(internal)?;
@@ -133,6 +144,7 @@ pub async fn create_workflow(
 ///   * JSON (API): {"name": "approve", "payload": <any json>}
 ///   * urlencoded form (the workflow page's "Send event" form via hx-post):
 ///     name=approve&payload=<json text>
+///
 /// The payload is stored as its JSON text; await-event hands that string to the
 /// guest verbatim. Queueing is fire-and-forget: the workflow needn't be parked on
 /// a matching await-event yet (or ever) — undelivered events simply wait.
@@ -183,8 +195,9 @@ pub async fn post_event(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Step-1 claim on an in-flight upgrade. Drop removes the id on EVERY exit path
-/// of the handler — success, validation 409, timeout, panic (SPEC.md Task 3.6).
+/// Step-1 claim on an in-flight upgrade OR cancel (one per-workflow operation at
+/// a time — they must not interleave). Drop removes the id on EVERY exit path of
+/// the handler — success, validation 409, timeout, panic (SPEC.md Task 3.6).
 struct UpgradeClaim {
     shared: Arc<EngineShared>,
     id: String,
@@ -207,6 +220,38 @@ impl Drop for UpgradeClaim {
     fn drop(&mut self) {
         self.shared.upgrades.lock().unwrap().remove(&self.id);
     }
+}
+
+/// Shared by upgrade step 3 and the cancel endpoint: raise the abort flag, then
+/// join the workflow's thread bounded (30s, polling is_finished — never a
+/// blocking join). On timeout the flag is cleared and the handle goes BACK so a
+/// retry joins THIS still-running thread (status.md dev. 14). On success the
+/// flag is cleared unconditionally: the thread-already-exited path never
+/// observed it, and a set-but-unobserved flag would instantly abort the next
+/// spawn of this workflow (status.md dev. 15).
+async fn abort_and_join(shared: &Arc<EngineShared>, id: &str) -> Result<(), ApiErr> {
+    shared.notifier.set_abort(id);
+    if let Some(h) = shared.take_thread(id) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if h.is_finished() {
+                let _ = h.join(); // instant; worker outcomes were already recorded
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                shared.notifier.clear_abort(id);
+                shared.put_thread(id, h);
+                return Err((
+                    StatusCode::CONFLICT,
+                    "workflow is busy executing (a host call is in flight); retry shortly"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    shared.notifier.clear_abort(id);
+    Ok(())
 }
 
 /// POST /api/workflows/{id}/upgrade — Task 3.6. Two body shapes like the other
@@ -247,9 +292,21 @@ pub async fn upgrade_workflow(
         let wf = db::get_workflow(&conn, &id)
             .map_err(internal)?
             .ok_or((StatusCode::NOT_FOUND, "unknown workflow id".to_string()))?;
-        if !db::module_exists(&conn, &new_hash).map_err(internal)? {
-            return Err((StatusCode::NOT_FOUND, "unknown module hash".to_string()));
-        }
+        let wasm = db::get_module_wasm(&conn, &new_hash)
+            .map_err(internal)?
+            .ok_or((StatusCode::NOT_FOUND, "unknown module hash".to_string()))?;
+        // Post-review hardening: pre-flight the NEW module before anything
+        // destructive. Without this, upgrading to a module that can't compile or
+        // doesn't export the workflow world discarded the journal tail and THEN
+        // failed at respawn — bricking the workflow (failed is terminal). Sync
+        // CPU work in an async handler, accepted: upgrades are rare, and the
+        // compile is a cache hit for any module that has ever run.
+        runner::preflight(&shared, &new_hash, &wasm).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("new module failed pre-flight (upgrading to it would brick the workflow): {e:#}"),
+            )
+        })?;
         if wf.status != "sleeping" && wf.status != "waiting_event" {
             return Err((
                 StatusCode::CONFLICT,
@@ -269,39 +326,9 @@ pub async fn upgrade_workflow(
     }
 
     // Step 3 — yank the parked worker. set_abort() also notifies, so the park
-    // loop re-checks immediately and bails with AbortForUpgrade (the runner exits
-    // that thread silently, status untouched).
-    shared.notifier.set_abort(&id);
-    if let Some(h) = shared.take_thread(&id) {
-        // Bounded join WITHOUT blocking the async handler: poll is_finished and
-        // only join once true (then it's instant). Deviation from the spec's
-        // spawn_blocking sketch (status.md dev. 14): on timeout the handle goes
-        // BACK into the registry, so a retry joins THIS still-running thread
-        // instead of concluding "already exited" and racing a live worker.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if h.is_finished() {
-                let _ = h.join(); // instant; worker errors were already recorded
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                // Leaving the abort flag set here would zombie the workflow at
-                // its next park — clearing it is MANDATORY (spec step 3).
-                shared.notifier.clear_abort(&id);
-                shared.put_thread(&id, h);
-                return Err((
-                    StatusCode::CONFLICT,
-                    "workflow is actively executing (not parked); retry when it parks"
-                        .to_string(),
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
-    // The joined worker's runner cleared the flag on its way out; the
-    // thread-already-exited path never observed it. Clear unconditionally so a
-    // set-but-unobserved flag can't instantly abort the respawned workflow.
-    shared.notifier.clear_abort(&id);
+    // loop re-checks immediately and bails with AbortForUpgrade (the runner
+    // exits that thread silently, status untouched).
+    abort_and_join(&shared, &id).await?;
 
     // Steps 4+5 — re-read state post-join: the worker may have advanced (even
     // completed) between validation and the abort landing. C comes from the
@@ -327,6 +354,57 @@ pub async fn upgrade_workflow(
     runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 3 of 3 (§0)
     Ok(Json(
         json!({ "id": id, "module_hash": new_hash, "resumed_from_seq": c_seq }),
+    ))
+}
+
+/// POST /api/workflows/{id}/cancel — post-review hardening: the operator's off
+/// switch. Two paths converge on the same abort flag: parked workflows bail in
+/// their park loop immediately (set_abort notifies), and guests spinning in
+/// pure wasm trap at the next epoch tick (≤1s — runner.rs's deadline callback).
+/// The workflow lands in 'failed' with an explanatory output; terminal states
+/// are permanent, so completed/failed workflows refuse with 409. No body.
+pub async fn cancel_workflow(
+    State(shared): State<Arc<EngineShared>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiErr> {
+    // Same claim as upgrade: a cancel and an upgrade must not interleave.
+    let _claim = UpgradeClaim::acquire(&shared, &id).ok_or((
+        StatusCode::CONFLICT,
+        "another operation (upgrade or cancel) is in progress for this workflow".to_string(),
+    ))?;
+
+    {
+        let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+        let wf = db::get_workflow(&conn, &id)
+            .map_err(internal)?
+            .ok_or((StatusCode::NOT_FOUND, "unknown workflow id".to_string()))?;
+        if wf.status == "completed" || wf.status == "failed" {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("workflow is already {} — nothing to cancel", wf.status),
+            ));
+        }
+    }
+
+    abort_and_join(&shared, &id).await?;
+
+    // The worker is gone, the claim blocks upgrade, and nothing else spawns
+    // existing ids mid-run (creation mints fresh uuids; recovery is startup-
+    // only). Re-check before the terminal write: the worker may have finished
+    // on its own between validation and the abort landing — outcomes stand.
+    let mut conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let wf = db::get_workflow(&conn, &id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "unknown workflow id".to_string()))?;
+    if wf.status == "completed" || wf.status == "failed" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("workflow reached {} before the cancel landed", wf.status),
+        ));
+    }
+    db::finish_cancel(&mut conn, &id, "cancelled by operator").map_err(internal)?;
+    Ok(Json(
+        json!({ "id": id, "status": "failed", "output": "cancelled by operator" }),
     ))
 }
 

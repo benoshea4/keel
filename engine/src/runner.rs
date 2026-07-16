@@ -23,7 +23,7 @@ use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::Store;
 
 use crate::db;
-use crate::host::{AbortForUpgrade, Ctx, Workflow};
+use crate::host::{AbortForUpgrade, Ctx, Workflow, WorkflowPre};
 use crate::journal::JournalCtx;
 use crate::notifier::Notifier;
 
@@ -60,9 +60,25 @@ impl EngineShared {
     pub fn new(db_path: String, max_running: u32) -> Result<Self> {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
+        // Post-review hardening: epoch interruption, so a guest stuck in pure
+        // wasm (`loop {}`) can still be aborted. The park loops check the abort
+        // flag, but a spinning guest never parks — without this, its only off
+        // switch was hand-editing the database.
+        config.epoch_interruption(true);
+        let engine = wasmtime::Engine::new(&config)?;
+        {
+            // Detached ticker for the process-wide Engine (clones share state).
+            // One tick per second = the worst-case latency for cancelling a
+            // guest that is executing wasm rather than parked in a host call.
+            let engine = engine.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                engine.increment_epoch();
+            });
+        }
         Ok(EngineShared {
             db_path,
-            engine: wasmtime::Engine::new(&config)?,
+            engine,
             components: Mutex::new(HashMap::new()),
             http: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
@@ -89,7 +105,9 @@ impl EngineShared {
         self.threads.lock().unwrap().insert(id.to_string(), h);
     }
 
-    fn component(&self, hash: &str, wasm: &[u8]) -> Result<Component> {
+    /// pub for the upgrade pre-flight (api.rs via preflight() below); the cache
+    /// only ever holds components that compiled successfully.
+    pub fn component(&self, hash: &str, wasm: &[u8]) -> Result<Component> {
         let mut cache = self.components.lock().unwrap();
         if let Some(c) = cache.get(hash) {
             return Ok(c.clone());
@@ -103,6 +121,21 @@ impl EngineShared {
         cache.insert(hash.to_string(), c.clone());
         Ok(c)
     }
+}
+
+/// Post-review hardening (upgrade pre-flight): prove `wasm` compiles AND matches
+/// the workflow world — host-api imports, run/resume exports — WITHOUT running
+/// any guest code. The upgrade endpoint calls this before its destructive
+/// tail-discard txn: upgrading to a module that could never start used to brick
+/// the workflow (the respawn failed, and failed is terminal). Compile is a cache
+/// hit for any module that has ever run.
+pub fn preflight(shared: &EngineShared, hash: &str, wasm: &[u8]) -> Result<()> {
+    let component = shared.component(hash, wasm)?;
+    let mut linker: Linker<Ctx> = Linker::new(&shared.engine);
+    Workflow::add_to_linker::<_, HasSelf<Ctx>>(&mut linker, |c| c)?;
+    let pre = linker.instantiate_pre(&component)?; // import surface check
+    WorkflowPre::<Ctx>::new(pre)?; // run/resume export + type check
+    Ok(())
 }
 
 /// Holds one --max-running permit. Released on ANY thread exit — Drop also runs
@@ -123,7 +156,14 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        *self.0.running.lock().unwrap() -= 1;
+        // Poison-tolerant: releasing a permit must never fail (a leaked permit is
+        // a slot gone until restart), and the count is a plain integer — always
+        // valid to touch even if some other thread panicked mid-lock.
+        *self
+            .0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
         self.0.running_cv.notify_all();
     }
 }
@@ -140,18 +180,47 @@ pub fn spawn(shared: Arc<EngineShared>, workflow_id: String) {
         // recovery never stall on it; over-cap workflows just sit as idle threads
         // until a permit frees up.
         let _permit = Permit::acquire(shared.clone());
-        if let Err(e) = run_workflow(&shared, &workflow_id) {
+        // Post-review hardening: a panic in run_workflow used to skip BOTH the
+        // failed-status write and the registry self-remove, zombifying the
+        // workflow (status says parked/running, no thread behind it) until the
+        // next restart. Catch it, record it, always fall through to the exit
+        // path. AssertUnwindSafe: shared state is all behind Mutexes, and the
+        // panicked call's own state is discarded wholesale.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_workflow(&shared, &workflow_id)
+        }));
+        let failure = match result {
+            Ok(Ok(())) => None,
             // Infrastructure failure (db unreachable, module row missing, linker
             // error...) — distinct from guest failure, which run_workflow records
             // itself. Best-effort mark failed; if even that fails we can only log.
-            tracing::error!(workflow = %workflow_id, "runner error: {e:#}");
+            Ok(Err(e)) => Some(format!("runner error: {e:#}")),
+            Err(p) => {
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                Some(format!("runner panic: {msg}"))
+            }
+        };
+        if let Some(msg) = failure {
+            tracing::error!(workflow = %workflow_id, "{msg}");
             if let Ok(c) = db::open_conn(&shared.db_path) {
-                let _ = db::set_status(&c, &workflow_id, "failed", Some(&format!("runner error: {e:#}")));
+                let _ = db::set_status(&c, &workflow_id, "failed", Some(&msg));
             }
         }
         // Task 3.5 — the thread removes ITSELF on every exit path (completed,
-        // failed, aborted-for-upgrade, runner error).
-        shared.threads.lock().unwrap().remove(&workflow_id);
+        // failed, aborted, runner error, panic). Poison-tolerant: deregistering
+        // a dead thread is exactly when limping past a poisoned lock is right.
+        shared
+            .threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&workflow_id);
+        // Post-review hardening: the notifier entry would otherwise leak one Arc
+        // per workflow forever. A late notify() just re-creates it — harmless.
+        shared.notifier.remove_entry(&workflow_id);
     });
     registry_shared
         .threads
@@ -208,6 +277,20 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
         db_path: shared.db_path.clone(),
     };
     let mut store = Store::new(&shared.engine, ctx);
+    // Post-review hardening: with epoch_interruption on, every store needs a
+    // deadline. The callback re-arms it each 1s tick unless the abort flag is
+    // set — turning cancel/upgrade into a trap even for guests that never park.
+    // The AbortForUpgrade in the error chain routes through the same silent-exit
+    // arm as the park-loop aborts below.
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(|cx| {
+        let d = cx.data();
+        if d.notifier.is_aborted(&d.j.workflow_id) {
+            Err(wasmtime::Error::from_anyhow(anyhow::Error::new(AbortForUpgrade)))
+        } else {
+            Ok(wasmtime::UpdateDeadline::Continue(1))
+        }
+    });
     let instance = Workflow::instantiate(&mut store, &component, &linker)?;
 
     db::set_status(&store.data().j.db, id, "running", None)?;

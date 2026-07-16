@@ -44,12 +44,14 @@ pub struct Ctx {
     pub db_path: String,
 }
 
-/// Sentinel error the park loops (sleep_ms, await_event) bail with when the
-/// notifier's abort flag is set. Nothing sets that flag until PHASE 3: Task 3.6's
-/// upgrade endpoint sets it, and Task 3.5's runner result-match downcasts to this
-/// type (via anyhow root_cause/chain) to exit the thread WITHOUT marking the
-/// workflow failed. Defined as a real error type now so those downcasts work
-/// without reworking the loops later.
+/// Sentinel error a worker thread bails with when the notifier's abort flag is
+/// set. Raised from three places: the two park loops below (sleep_ms,
+/// await_event) and the epoch-deadline callback in runner.rs (which catches
+/// guests spinning in pure wasm that never reach a park loop). Two callers set
+/// the flag: the upgrade endpoint (Task 3.6) and the cancel endpoint
+/// (post-review hardening). The runner's result-match downcasts to this type
+/// (walking the anyhow chain) to exit the thread WITHOUT marking the workflow
+/// failed — the endpoint that raised the flag owns what happens next.
 #[derive(Debug)]
 pub struct AbortForUpgrade;
 
@@ -112,9 +114,9 @@ impl keel::workflow::host_api::Host for Ctx {
         // ABSOLUTE wake_at, then parks. kill -9 mid-sleep → recovery replays to
         // this same seq, finds no journal row but an existing timers row, KEEPS its
         // wake_at, and parks only for the remainder (the phase-1 full-re-sleep wart
-        // is gone). The journal row commits only on wake; a crash between the
-        // timers DELETE and that INSERT re-runs a full sleep — the documented §6
-        // at-least-once caveat.
+        // is gone). The wake-up (timer delete + journal insert + status flip) is
+        // ONE transaction — kill -9 at any instant leaves either the parked state
+        // (remainder honored on recovery) or the fully-committed wake.
         #[derive(Serialize)]
         struct Req {
             ms: u64,
@@ -163,9 +165,7 @@ impl keel::workflow::host_api::Host for Ctx {
         if self.notifier.is_aborted(&id) {
             return Err(trap(anyhow::Error::new(AbortForUpgrade)));
         }
-        db::delete_timer(&self.j.db, &id).map_err(trap)?;
-        db::insert_journal_row(&self.j.db, &id, seq, "sleep-ms", &req_json, "{}").map_err(trap)?;
-        db::set_status(&self.j.db, &id, "running", None).map_err(trap)?;
+        db::finish_sleep(&mut self.j.db, &id, seq, &req_json).map_err(trap)?;
         Ok(())
     }
 
@@ -238,11 +238,12 @@ impl keel::workflow::host_api::Host for Ctx {
             if self.notifier.is_aborted(&id) {
                 return Err(trap(anyhow::Error::new(AbortForUpgrade)));
             }
+            // The delivery txn also flips status back to running (all-or-nothing
+            // with the consume + journal — see db::deliver_event_and_journal).
             if let Some(payload) =
                 db::deliver_event_and_journal(&mut self.j.db, &id, seq, &name, &req_json)
                     .map_err(trap)?
             {
-                db::set_status(&self.j.db, &id, "running", None).map_err(trap)?;
                 return Ok(payload);
             }
             self.notifier.wait(&id, std::time::Duration::from_millis(1000));
@@ -301,7 +302,7 @@ fn do_http_get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
     const BACKOFF_MS: [u64; 3] = [500, 1000, 2000];
     let attempts = 3;
     let mut last_err = String::new();
-    for attempt in 0..attempts {
+    for (attempt, gap_ms) in BACKOFF_MS.iter().enumerate().take(attempts) {
         match agent.get(url).call() {
             Ok(resp) => {
                 let mut buf = Vec::new();
@@ -316,7 +317,7 @@ fn do_http_get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
             Err(e) => last_err = format!("transport: {e}"),
         }
         if attempt + 1 < attempts {
-            std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS[attempt]));
+            std::thread::sleep(std::time::Duration::from_millis(*gap_ms));
         }
     }
     Err(last_err)

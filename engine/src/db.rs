@@ -89,6 +89,19 @@ CREATE TABLE IF NOT EXISTS snapshots (
     module_hash TEXT NOT NULL,
     created_at  INTEGER NOT NULL
 );
+
+-- Post-review hardening: indexes for the two hot queries. Appended, never
+-- ALTERed; IF NOT EXISTS retrofits them onto existing DBs at startup.
+
+-- await-event's park loop runs this lookup every second per parked workflow;
+-- rows within equal (workflow_id, name, delivered) sit in rowid order inside
+-- the index, so the ORDER BY id LIMIT 1 needs no sort.
+CREATE INDEX IF NOT EXISTS idx_events_undelivered
+    ON events (workflow_id, name, delivered);
+
+-- the dashboard sorts every workflow by recency on every 2s poll
+CREATE INDEX IF NOT EXISTS idx_workflows_created_at
+    ON workflows (created_at);
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
@@ -326,6 +339,32 @@ pub fn delete_timer(c: &Connection, workflow_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The wake-up side of durable sleep (Task 2.4) in ONE transaction: drop the
+/// timer, journal the sleep, flip status back to running. These were three
+/// auto-commit statements once; a crash between the first two silently turned
+/// the remainder-sleep guarantee into a full re-sleep. All three writes still
+/// go through the single-purpose helpers — set_status stays the only status
+/// writer, it just runs against the transaction.
+pub fn finish_sleep(c: &mut Connection, workflow_id: &str, seq: i64, req_json: &str) -> Result<()> {
+    let tx = c.transaction()?;
+    delete_timer(&tx, workflow_id)?;
+    insert_journal_row(&tx, workflow_id, seq, "sleep-ms", req_json, "{}")?;
+    set_status(&tx, workflow_id, "running", None)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The cancel endpoint's terminal write in ONE transaction: clear any parked
+/// timer and mark the workflow failed with the cancellation note. Runs only
+/// after the worker thread is gone (api.rs aborts and joins it first).
+pub fn finish_cancel(c: &mut Connection, workflow_id: &str, note: &str) -> Result<()> {
+    let tx = c.transaction()?;
+    delete_timer(&tx, workflow_id)?;
+    set_status(&tx, workflow_id, "failed", Some(note))?;
+    tx.commit()?;
+    Ok(())
+}
+
 // --- Events (Task 2.5 external events) -----------------------------------------
 
 /// API side: queue an event for the workflow. It stays undelivered until an
@@ -345,7 +384,9 @@ pub fn insert_event(c: &Connection, workflow_id: &str, name: &str, payload: &str
 /// the event; the reverse order would deliver it twice. `req_json` is passed in
 /// (not rebuilt here) so the journal row's request field is byte-identical to what
 /// host.rs's replay check verifies against. Returns the payload, or None when no
-/// matching event is queued (caller parks and retries).
+/// matching event is queued (caller parks and retries). The flip back to running
+/// rides in the same transaction (post-review hardening — it used to be a
+/// separate write that a crash could skip, leaving a lying waiting_event).
 pub fn deliver_event_and_journal(
     c: &mut Connection,
     workflow_id: &str,
@@ -377,6 +418,7 @@ pub fn deliver_event_and_journal(
          VALUES (?1, ?2, 'await-event', ?3, ?4, ?5)",
         rusqlite::params![workflow_id, seq, req_json, resp_json, now_ms()],
     )?;
+    set_status(&tx, workflow_id, "running", None)?;
     tx.commit()?;
     Ok(Some(payload))
 }
@@ -481,4 +523,125 @@ pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
+}
+
+// --- Unit tests (post-review hardening) ------------------------------------------
+// These run against in-memory SQLite with the real MIGRATION. The multi-statement
+// transactions above (event delivery, upgrade tail-discard, sleep wake, cancel)
+// must each execute under a test before they execute in anger.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c).unwrap();
+        c
+    }
+
+    fn wf(c: &Connection, id: &str, hash: &str) {
+        insert_module(c, hash, "m", b"\0asm").unwrap();
+        create_workflow(c, id, hash, "{}").unwrap();
+    }
+
+    fn status_of(c: &Connection, id: &str) -> String {
+        get_workflow(c, id).unwrap().unwrap().status
+    }
+
+    fn event_row(c: &Connection, id: i64) -> (i64, Option<i64>) {
+        c.query_row(
+            "SELECT delivered, delivered_seq FROM events WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deliver_event_consumes_oldest_journals_and_flips_status() {
+        let mut c = mem();
+        wf(&c, "w", "h");
+        set_status(&c, "w", "waiting_event", None).unwrap();
+        let none = deliver_event_and_journal(&mut c, "w", 0, "go", r#"{"name":"go"}"#).unwrap();
+        assert_eq!(none, None, "no event queued yet");
+        insert_event(&c, "w", "go", r#"{"n":1}"#).unwrap();
+        insert_event(&c, "w", "go", r#"{"n":2}"#).unwrap();
+        insert_event(&c, "w", "other", "{}").unwrap();
+
+        let got = deliver_event_and_journal(&mut c, "w", 0, "go", r#"{"name":"go"}"#).unwrap();
+        assert_eq!(got.as_deref(), Some(r#"{"n":1}"#), "oldest matching event wins");
+        assert_eq!(event_row(&c, 1), (1, Some(0)), "consumed, tagged with its seq");
+        assert_eq!(event_row(&c, 2), (0, None), "second event still queued");
+        assert_eq!(event_row(&c, 3), (0, None), "name mismatch untouched");
+        let (kind, req, resp) = get_journal_row(&c, "w", 0).unwrap().unwrap();
+        assert_eq!(kind, "await-event");
+        assert_eq!(req, r#"{"name":"go"}"#);
+        assert_eq!(resp, r#"{"payload":"{\"n\":1}"}"#);
+        assert_eq!(status_of(&c, "w"), "running", "flip rides in the delivery txn");
+    }
+
+    #[test]
+    fn finish_sleep_is_one_atomic_wake() {
+        let mut c = mem();
+        wf(&c, "w", "h");
+        insert_timer(&c, "w", 4, 12345).unwrap();
+        set_status(&c, "w", "sleeping", None).unwrap();
+
+        finish_sleep(&mut c, "w", 4, r#"{"ms":50}"#).unwrap();
+        assert_eq!(get_timer_wake_at(&c, "w").unwrap(), None, "timer consumed");
+        let (kind, req, resp) = get_journal_row(&c, "w", 4).unwrap().unwrap();
+        assert_eq!(
+            (kind.as_str(), req.as_str(), resp.as_str()),
+            ("sleep-ms", r#"{"ms":50}"#, "{}")
+        );
+        assert_eq!(status_of(&c, "w"), "running");
+    }
+
+    #[test]
+    fn upgrade_txn_discards_tail_undelivers_and_repoints() {
+        let mut c = mem();
+        wf(&c, "w", "v1");
+        insert_module(&c, "v2", "m2", b"\0asm2").unwrap();
+        for seq in 0..=5 {
+            insert_journal_row(&c, "w", seq, "k", "{}", "{}").unwrap();
+        }
+        insert_timer(&c, "w", 6, 99999).unwrap();
+        insert_event(&c, "w", "e", "1").unwrap(); // id 1: delivered pre-checkpoint
+        insert_event(&c, "w", "e", "2").unwrap(); // id 2: delivered in the tail
+        insert_event(&c, "w", "e", "3").unwrap(); // id 3: never delivered
+        c.execute("UPDATE events SET delivered = 1, delivered_seq = 2 WHERE id = 1", [])
+            .unwrap();
+        c.execute("UPDATE events SET delivered = 1, delivered_seq = 5 WHERE id = 2", [])
+            .unwrap();
+        // checkpoint at C=3 prunes seq < 3 → journal is {3, 4, 5}
+        snapshot_and_prune(&mut c, "w", 3, b"state").unwrap();
+        let left: Vec<i64> = journal_rows(&c, "w").unwrap().iter().map(|r| r.seq).collect();
+        assert_eq!(left, vec![3, 4, 5], "prune keeps row C and the tail");
+
+        upgrade_module_txn(&mut c, "w", 3, "v2").unwrap();
+
+        let left: Vec<i64> = journal_rows(&c, "w").unwrap().iter().map(|r| r.seq).collect();
+        assert_eq!(left, vec![3], "tail beyond C discarded");
+        assert_eq!(get_timer_wake_at(&c, "w").unwrap(), None, "timers dropped");
+        assert_eq!(event_row(&c, 1), (1, Some(2)), "pre-checkpoint delivery stands");
+        assert_eq!(event_row(&c, 2), (0, None), "tail delivery UN-delivered");
+        assert_eq!(event_row(&c, 3), (0, None), "queued event untouched");
+        assert_eq!(get_workflow(&c, "w").unwrap().unwrap().module_hash, "v2");
+        assert_eq!(get_snapshot(&c, "w").unwrap().unwrap().module_hash, "v2");
+    }
+
+    #[test]
+    fn finish_cancel_clears_timer_and_fails_terminally() {
+        let mut c = mem();
+        wf(&c, "w", "h");
+        insert_timer(&c, "w", 0, 99999).unwrap();
+        set_status(&c, "w", "sleeping", None).unwrap();
+
+        finish_cancel(&mut c, "w", "cancelled by operator").unwrap();
+        assert_eq!(get_timer_wake_at(&c, "w").unwrap(), None);
+        let row = get_workflow(&c, "w").unwrap().unwrap();
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.output.as_deref(), Some("cancelled by operator"));
+    }
 }
