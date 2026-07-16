@@ -42,9 +42,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      # Preinstalled stable toolchain: runner images ship rustup + stable, and
+      # every matrix target is its runner's HOST triple, so nothing needs
+      # downloading. (The sh.rustup.rs bootstrap this replaces 503-flaked
+      # three release runs into the ground on 2026-07-16.)
+      - run: rustup default stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -64,12 +66,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG='${{ steps.tag.outputs.tag }}'
-          # Both matrix jobs may race to create a missing release — the final
-          # view settles it: whoever lost the create still finds the release.
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --verify-tag --generate-notes \
-            || gh release view "$TAG" >/dev/null
-          gh release upload "$TAG" \
-            "${{ steps.pkg.outputs.name }}.tar.gz" \
-            "${{ steps.pkg.outputs.name }}.tar.gz.sha256" \
-            --clobber
+          # Create-first, tolerate "already exists". The old chain led with
+          # `gh release view`, but the by-tag view endpoint has served
+          # 404/503 while the release EXISTED (2026-07-16), failing the whole
+          # step. Create's failure modes we can classify: raced-and-lost is
+          # fine, anything else is real.
+          if ! gh release create "$TAG" --verify-tag --generate-notes 2>create-err.txt; then
+            grep -qi "already exists" create-err.txt || { cat create-err.txt; exit 1; }
+          fi
+          # Uploads ride the same flaky endpoint — retry with backoff, fail
+          # loudly only when five attempts all lose.
+          ok=""
+          for i in 1 2 3 4 5; do
+            if gh release upload "$TAG" \
+              "${{ steps.pkg.outputs.name }}.tar.gz" \
+              "${{ steps.pkg.outputs.name }}.tar.gz.sha256" \
+              --clobber; then ok=1; break; fi
+            echo "upload attempt $i failed; retrying in 30s"
+            sleep 30
+          done
+          [ -n "$ok" ]
