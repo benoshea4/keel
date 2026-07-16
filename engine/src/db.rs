@@ -15,8 +15,7 @@
 // auditable in one place — with ONE deliberate exception: journal.rs, whose
 // journaled() core the spec fixes verbatim (§6).
 //
-// PHASE 3 (Task 3.2) APPENDS the `snapshots` table to MIGRATION below —
-// append, never ALTER.
+// The schema is complete for all 3 phases; future changes append, never ALTER.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
@@ -79,6 +78,16 @@ CREATE TABLE IF NOT EXISTS events (
                                             -- un-deliver events whose journal rows
                                             -- fall in the discarded tail
     created_at    INTEGER NOT NULL
+);
+
+-- Task 3.2 addition (appended, never ALTERed).
+
+CREATE TABLE IF NOT EXISTS snapshots (
+    workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+    journal_seq INTEGER NOT NULL,   -- the checkpoint call's own seq (call it C)
+    state       BLOB NOT NULL,
+    module_hash TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
 );
 ";
 
