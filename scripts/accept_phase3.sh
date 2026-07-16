@@ -60,11 +60,20 @@ SNAPS=$(sqlite3 $DB "SELECT COUNT(*) FROM snapshots WHERE workflow_id='$WF'")
 NJ=$(sqlite3 $DB "SELECT COUNT(*) FROM journal WHERE workflow_id='$WF'")
 [ "$NJ" -le 4 ] || { echo "FAIL: journal has $NJ rows — pruning is not working"; exit 1; }
 
-# 3. kill -9 mid-sleep; recovery must go through resume(), not a from-zero replay
+# 3. kill -9 mid-sleep; recovery must go through resume(), not a from-zero replay.
+# The listener binds the instant the recovery scan has SPAWNED workers; the
+# "resuming" line is written by the worker thread itself after it re-opens the
+# DB and compiles the module — poll for it instead of racing it (a CI runner
+# lost that race by ~15ms).
 kill -9 $ENG; sleep 1
 ./target/release/keel serve --db $DB >> engine.log 2>&1 & ENG=$!
 wait_ready
-grep -q "resuming" engine.log || { echo "FAIL: engine.log has no 'resuming' line"; exit 1; }
+RESUMED=""
+for i in $(seq 1 30); do
+  if grep -q "resuming" engine.log; then RESUMED=1; break; fi
+  sleep 0.5
+done
+[ -n "$RESUMED" ] || { echo "FAIL: engine.log has no 'resuming' line within 15s of restart"; exit 1; }
 
 # 4. upgrade to v2 while parked. The workflow is sleeping ~99% of the time; if
 # the POST lands exactly in the ~50ms tick window the engine rightly answers 409
