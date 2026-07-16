@@ -66,23 +66,40 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG='${{ steps.tag.outputs.tag }}'
-          # Create-first, tolerate "already exists". The old chain led with
-          # `gh release view`, but the by-tag view endpoint has served
-          # 404/503 while the release EXISTED (2026-07-16), failing the whole
-          # step. Create's failure modes we can classify: raced-and-lost is
-          # fine, anything else is real.
+          REPO='${{ github.repository }}'
+          # Create-first, tolerate "already exists" (a matrix sibling may have
+          # won the race, or the release may predate this run). Everything
+          # below deliberately avoids the /releases/tags/<tag> endpoint: it
+          # 503'd through ENTIRE runs on 2026-07-16 — including inside
+          # `gh release view` and `gh release upload` — while the list and
+          # by-id endpoints stayed healthy. Resolve the id from the LIST,
+          # upload by id via uploads.github.com.
           if ! gh release create "$TAG" --verify-tag --generate-notes 2>create-err.txt; then
             grep -qi "already exists" create-err.txt || { cat create-err.txt; exit 1; }
           fi
-          # Uploads ride the same flaky endpoint — retry with backoff, fail
-          # loudly only when five attempts all lose.
-          ok=""
+          RELID=""
           for i in 1 2 3 4 5; do
-            if gh release upload "$TAG" \
-              "${{ steps.pkg.outputs.name }}.tar.gz" \
-              "${{ steps.pkg.outputs.name }}.tar.gz.sha256" \
-              --clobber; then ok=1; break; fi
-            echo "upload attempt $i failed; retrying in 30s"
-            sleep 30
+            RELID=$(gh api "repos/$REPO/releases?per_page=100" \
+              --jq ".[] | select(.tag_name==\"$TAG\") | .id" 2>/dev/null | head -1) || true
+            [ -n "$RELID" ] && break
+            echo "release id lookup attempt $i failed; retrying in 20s"; sleep 20
           done
-          [ -n "$ok" ]
+          [ -n "$RELID" ]
+          for f in "${{ steps.pkg.outputs.name }}.tar.gz" "${{ steps.pkg.outputs.name }}.tar.gz.sha256"; do
+            ok=""
+            for i in 1 2 3 4 5; do
+              # clobber semantics: drop a same-named asset before uploading
+              AID=$(gh api "repos/$REPO/releases/$RELID/assets?per_page=100" \
+                --jq ".[] | select(.name==\"$f\") | .id" 2>/dev/null | head -1) || true
+              if [ -n "$AID" ]; then
+                gh api -X DELETE "repos/$REPO/releases/$RELID/assets/$AID" >/dev/null 2>&1 || true
+              fi
+              if gh api --method POST -H "Content-Type: application/octet-stream" \
+                  "https://uploads.github.com/repos/$REPO/releases/$RELID/assets?name=$f" \
+                  --input "$f" >/dev/null; then
+                ok=1; break
+              fi
+              echo "upload of $f attempt $i failed; retrying in 30s"; sleep 30
+            done
+            [ -n "$ok" ]
+          done
