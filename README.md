@@ -21,6 +21,10 @@ fast-forwards deterministically to where it died. There is no separate replay mo
 
 ## Quick start
 
+Prebuilt engine binaries (Linux x86_64, macOS arm64) are attached to each
+[GitHub release](https://github.com/benoshea4/keel/releases) with sha256
+checksums — or build from source:
+
 ```bash
 # build engine + demo guest (needs: rust, cargo-component, wasm32-unknown-unknown target)
 cargo build --release -p keel-engine

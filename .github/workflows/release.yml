@@ -1,0 +1,71 @@
+# Prebuilt binaries on every release tag. keel is a single self-contained
+# binary (htmx/css/templates are compiled in), so each artifact is just the
+# executable, tarred, with a sha256 alongside.
+#
+# Triggers: pushing a v* tag, or manual dispatch with an EXISTING tag to
+# backfill assets (the build checks out the tag's code either way; symbols are
+# stripped at link time via CARGO_PROFILE_RELEASE_STRIP so local builds keep
+# theirs). If the release doesn't exist yet it is created with generated
+# notes; hand-written notes (like v1.0's) are left untouched.
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach binaries to (e.g. v1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: cargo build --release -p keel-engine --target ${{ matrix.target }}
+      - name: Package
+        id: pkg
+        run: |
+          NAME="keel-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          tar -C "target/${{ matrix.target }}/release" -czf "${NAME}.tar.gz" keel
+          shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG='${{ steps.tag.outputs.tag }}'
+          # Both matrix jobs may race to create a missing release — the final
+          # view settles it: whoever lost the create still finds the release.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --generate-notes \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" \
+            "${{ steps.pkg.outputs.name }}.tar.gz" \
+            "${{ steps.pkg.outputs.name }}.tar.gz.sha256" \
+            --clobber

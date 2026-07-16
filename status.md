@@ -258,6 +258,8 @@ keel/
 ├── guests/counter/          Task 3.7 acceptance guest: v1/v2 via feature flag; ticks + checkpoints
 ├── guests/spin/             cancel-me fixture: spins in pure wasm forever (hardening E)
 ├── .github/workflows/ci.yml clippy -D warnings + unit tests + all four scripts (hardening F)
+├── .github/workflows/release.yml  v* tag → stripped binaries (linux x86_64, macOS arm64)
+│                            tarred + sha256, attached to the GitHub release
 └── scripts/
     ├── accept_phase1.sh     Task 1.7 assertions; harness hardened (trap/readiness/local stub)
     ├── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
