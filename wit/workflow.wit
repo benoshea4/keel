@@ -1,7 +1,8 @@
-// The ONLY contract between engine and guests (SPEC.md §4 — copied exactly).
-// Phase 2 bumps to 0.2.0 (adds await-event); phase 3 to 0.3.0 (adds checkpoint +
-// resume export, a breaking change). Never edit an interface in place mid-phase.
-package keel:workflow@0.1.0;
+// The ONLY contract between engine and guests (SPEC.md §4 + Task 2.1).
+// 0.2.0 added await-event (a new import — non-breaking; guests that don't call it
+// keep working once rebuilt). Phase 3 bumps to 0.3.0 (adds checkpoint + a resume
+// export — THAT one is breaking). Never edit an interface in place mid-phase.
+package keel:workflow@0.2.0;
 
 interface host-api {
     /// Journaled HTTP GET. ok = response body (utf-8, truncated by host to 1 MiB),
@@ -16,6 +17,10 @@ interface host-api {
 
     /// Journaled pseudo-randomness.
     random-u64: func() -> u64;
+
+    /// Journaled. Blocks until an event with this name is delivered to the workflow
+    /// via POST /api/workflows/:id/events. Returns the event payload (JSON string).
+    await-event: func(name: string) -> string;
 
     /// NOT journaled as an effect: forwarded to engine logs, tagged with the
     /// workflow id. Free to call; returns nothing; identical on replay by
