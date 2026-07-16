@@ -1,0 +1,3 @@
+Keel phase-1 acceptance stub body. Served by scripts/accept_phase1.sh via
+python3 -m http.server on 127.0.0.1:18080 so the definition of done never
+depends on example.com being reachable.

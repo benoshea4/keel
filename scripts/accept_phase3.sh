@@ -2,6 +2,8 @@
 # Phase 3 acceptance (SPEC.md Task 3.8) — fresh DB; engine output collects in
 # engine.log (>> on restarts); if it fails, fix the ENGINE, not this script.
 # Definition of done: prints "PHASE 3 PASS" twice in a row, fresh DB each time.
+# Hardened post-review: trap cleanup (no leaked server on failure), port
+# preflight, readiness polling after every engine launch.
 #
 # What it proves: checkpoint prunes the journal (row count stays tiny across
 # ticks), recovery goes through resume() from the snapshot (engine.log says
@@ -11,6 +13,22 @@
 # (409).
 set -euo pipefail
 DB=accept3.db; rm -f $DB $DB-shm $DB-wal
+
+ENG=""
+cleanup() { if [ -n "${ENG:-}" ]; then kill -9 "$ENG" 2>/dev/null || true; fi; }
+trap cleanup EXIT
+
+if curl -sf -o /dev/null --max-time 1 localhost:8080/; then
+  echo "FAIL: something is already listening on :8080 — kill it first"; exit 1
+fi
+wait_ready() {
+  for i in $(seq 1 50); do
+    curl -sf -o /dev/null localhost:8080/ && return 0
+    sleep 0.2
+  done
+  echo "FAIL: engine did not answer on :8080 within 10s (see engine.log)"; exit 1
+}
+
 cargo build --release -p keel-engine
 # one crate, two artifacts: same output filename — copy each aside (Task 3.7)
 (cd guests/counter \
@@ -19,7 +37,8 @@ cargo build --release -p keel-engine
   && cargo component build --release --target wasm32-unknown-unknown --features v2 \
   && cp target/wasm32-unknown-unknown/release/counter.wasm counter-v2.wasm)
 
-./target/release/keel serve --db $DB > engine.log 2>&1 & ENG=$!; sleep 1
+./target/release/keel serve --db $DB > engine.log 2>&1 & ENG=$!
+wait_ready
 
 H1=$(curl -s -X POST --data-binary @guests/counter/counter-v1.wasm \
   "localhost:8080/api/modules?name=counter-v1" | python3 -c 'import sys,json;print(json.load(sys.stdin)["hash"])')
@@ -43,7 +62,8 @@ NJ=$(sqlite3 $DB "SELECT COUNT(*) FROM journal WHERE workflow_id='$WF'")
 
 # 3. kill -9 mid-sleep; recovery must go through resume(), not a from-zero replay
 kill -9 $ENG; sleep 1
-./target/release/keel serve --db $DB >> engine.log 2>&1 & ENG=$!; sleep 1
+./target/release/keel serve --db $DB >> engine.log 2>&1 & ENG=$!
+wait_ready
 grep -q "resuming" engine.log || { echo "FAIL: engine.log has no 'resuming' line"; exit 1; }
 
 # 4. upgrade to v2 while parked. The workflow is sleeping ~99% of the time; if

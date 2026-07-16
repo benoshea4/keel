@@ -13,6 +13,8 @@ edition = "2021"
 [dependencies]
 # version matches what cargo-component 0.21.1 generates bindings for
 wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+# post-review hardening: the fetch url is read from the input JSON
+serde_json = "1"
 
 [lib]
 crate-type = ["cdylib"]

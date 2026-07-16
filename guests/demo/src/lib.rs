@@ -18,11 +18,20 @@ struct Component;
 impl bindings::Guest for Component {
     fn run(input: String) -> Result<String, String> {
         host::log(&format!("starting with input {input}"));
+        // Post-review hardening: the fetch target comes from input ({"url": ...})
+        // so the acceptance script can point it at a local stub — the definition
+        // of done must not depend on example.com/DNS being reachable. Determinism
+        // is unaffected: input is fixed at creation, so replay derives the same
+        // url. The default keeps bare {} runs working.
+        let url = serde_json::from_str::<serde_json::Value>(&input)
+            .ok()
+            .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "https://example.com/".to_string());
         let stamp = host::random_u64();
-        let a = host::http_get("https://example.com/")?;
+        let a = host::http_get(&url)?;
         host::log(&format!("first fetch: {} bytes", a.len()));
         host::sleep_ms(15_000);
-        let b = host::http_get("https://example.com/")?;
+        let b = host::http_get(&url)?;
         Ok(format!(
             r#"{{"stamp":{stamp},"first_len":{},"second_len":{}}}"#,
             a.len(),

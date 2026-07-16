@@ -2,7 +2,8 @@
 # Phase 2 acceptance (SPEC.md Task 2.10) — same style as phase 1: fresh DB, engine
 # output collects in engine.log (>> on restarts), and if it fails you fix the
 # ENGINE, not this script. Definition of done: prints "PHASE 2 PASS" twice in a
-# row, fresh DB each time.
+# row, fresh DB each time. Hardened post-review: trap cleanup (no leaked server
+# on failure), port preflight, readiness polling after every engine launch.
 #
 # What it proves: await-event parks durably (kill -9 at the park point survives),
 # event delivery is exactly-once (1 journal row), the durable sleep keeps its
@@ -10,10 +11,27 @@
 # restarted one), and the UI serves its pages + embedded assets.
 set -euo pipefail
 DB=accept2.db; rm -f $DB $DB-shm $DB-wal
+
+ENG=""
+cleanup() { if [ -n "${ENG:-}" ]; then kill -9 "$ENG" 2>/dev/null || true; fi; }
+trap cleanup EXIT
+
+if curl -sf -o /dev/null --max-time 1 localhost:8080/; then
+  echo "FAIL: something is already listening on :8080 — kill it first"; exit 1
+fi
+wait_ready() {
+  for i in $(seq 1 50); do
+    curl -sf -o /dev/null localhost:8080/ && return 0
+    sleep 0.2
+  done
+  echo "FAIL: engine did not answer on :8080 within 10s (see engine.log)"; exit 1
+}
+
 cargo build --release -p keel-engine
 (cd guests/approval && cargo component build --release --target wasm32-unknown-unknown)
 
-./target/release/keel serve --db $DB > engine.log 2>&1 & ENG=$!; sleep 1
+./target/release/keel serve --db $DB > engine.log 2>&1 & ENG=$!
+wait_ready
 
 HASH=$(curl -s -X POST --data-binary @guests/approval/target/wasm32-unknown-unknown/release/approval.wasm \
   "localhost:8080/api/modules?name=approval" | python3 -c 'import sys,json;print(json.load(sys.stdin)["hash"])')
@@ -28,6 +46,7 @@ for i in $(seq 1 15); do ST=$(status); [ "$ST" = "waiting_event" ] && break; sle
 [ "$ST" = "waiting_event" ] || { echo "FAIL: expected waiting_event before crash, got $ST"; exit 1; }
 kill -9 $ENG; sleep 1
 ./target/release/keel serve --db $DB >> engine.log 2>&1 & ENG=$!
+wait_ready
 # recovery legitimately passes through 'running' while replaying — poll up to 15s,
 # an immediate assert here is a flake, not a check (SPEC.md Task 2.10 step 2)
 for i in $(seq 1 15); do ST=$(status); [ "$ST" = "waiting_event" ] && break; sleep 1; done
@@ -44,7 +63,8 @@ W1=$(sqlite3 $DB "SELECT wake_at FROM timers WHERE workflow_id='$WF'")
 
 # 4. kill -9 mid-sleep; the wake deadline must survive the crash UNCHANGED
 kill -9 $ENG; sleep 1
-./target/release/keel serve --db $DB >> engine.log 2>&1 & ENG=$!; sleep 1
+./target/release/keel serve --db $DB >> engine.log 2>&1 & ENG=$!
+wait_ready
 W2=$(sqlite3 $DB "SELECT wake_at FROM timers WHERE workflow_id='$WF'")
 [ "$W1" = "$W2" ] || { echo "FAIL: wake_at changed across restart ($W1 -> $W2): sleep restarted instead of resuming"; exit 1; }
 
