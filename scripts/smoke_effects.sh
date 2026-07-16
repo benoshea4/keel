@@ -67,9 +67,20 @@ wait_ready
 for i in $(seq 1 30); do ST=$(status); [ "$ST" = "completed" ] && break; sleep 1; done
 [ "$ST" = "completed" ] || { echo "FAIL: status=$ST after recovery"; exit 1; }
 
-# 2. replay proof: recovery must NOT have re-POSTed
-POSTS=$(curl -s localhost:18081/count | python3 -c 'import sys,json;print(json.load(sys.stdin)["posts"])')
+# 2. replay proof: recovery must NOT have re-POSTed. And the wire carried the
+# v2.3 idempotency key for exactly this call: workflow_id:seq (the POST is the
+# guest's second host call → seq 1) — the remote's handle for deduping the
+# at-least-once window.
+COUNT=$(curl -s localhost:18081/count)
+POSTS=$(echo "$COUNT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["posts"])')
+KEY=$(echo "$COUNT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')
 [ "$POSTS" = "1" ] || { echo "FAIL: stub saw $POSTS POSTs — http-request re-executed on replay"; exit 1; }
+[ "$KEY" = "$WF:1" ] || { echo "FAIL: idempotency key was '$KEY', want '$WF:1'"; exit 1; }
+# ...and the key is WIRE-ONLY: journaled requests keep exactly what the guest
+# asked (this is what keeps pre-v2.3 journals replayable).
+if sqlite3 $DB "SELECT request FROM journal WHERE kind='http-request'" | grep -q "keel-idempotency-key"; then
+  echo "FAIL: keel-idempotency-key leaked into the journal (must be wire-only)"; exit 1
+fi
 
 # 3. output + journal shape
 OUT=$(sqlite3 $DB "SELECT output FROM workflows WHERE id='$WF'")
@@ -84,8 +95,10 @@ for want in "http-request 3" "kv-set 2" "kv-get 2" "sleep-ms 1"; do
   GOT=$(sqlite3 $DB "SELECT COUNT(*) FROM journal WHERE workflow_id='$WF' AND kind='$KIND'")
   [ "$GOT" = "$N" ] || { echo "FAIL: expected $N $KIND rows, got $GOT"; exit 1; }
 done
-V=$(sqlite3 $DB "SELECT value FROM kv WHERE workflow_id='$WF' AND key='phase'")
-[ "$V" = "two" ] || { echo "FAIL: kv table has phase='$V', want 'two'"; exit 1; }
+V=$(sqlite3 $DB "SELECT value FROM kv WHERE workflow_id='$WF' AND key='phase' ORDER BY seq DESC LIMIT 1")
+[ "$V" = "two" ] || { echo "FAIL: kv latest version has phase='$V', want 'two'"; exit 1; }
+NV=$(sqlite3 $DB "SELECT COUNT(*) FROM kv WHERE workflow_id='$WF' AND key='phase'")
+[ "$NV" = "2" ] || { echo "FAIL: expected 2 kv versions of 'phase' (v2.3 append-only), got $NV"; exit 1; }
 
 # 4. schedules: counter target=0 completes instantly; a 2s interval must fire
 # at least twice in ~5.5s, and deleting the schedule stops it

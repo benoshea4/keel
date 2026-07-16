@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 count = 0
 last_auth = ""
+last_key = ""
 
 
 class H(BaseHTTPRequestHandler):
@@ -33,7 +34,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/count":
-            self._send(200, json.dumps({"posts": count, "auth": last_auth}))
+            self._send(200, json.dumps({"posts": count, "auth": last_auth, "key": last_key}))
         elif self.path == "/body.txt":
             self._send(200, "stub body")
         elif self.path == "/slow":
@@ -46,11 +47,13 @@ class H(BaseHTTPRequestHandler):
             self._send(404, json.dumps({"err": "nope"}))
 
     def do_POST(self):
-        global count, last_auth
+        global count, last_auth, last_key
         if self.path == "/echo":
             count += 1
             if self.headers.get("authorization"):
                 last_auth = self.headers.get("authorization")
+            if self.headers.get("keel-idempotency-key"):
+                last_key = self.headers.get("keel-idempotency-key")
             n = int(self.headers.get("content-length", 0))
             body = self.rfile.read(n).decode()
             self._send(200, json.dumps({"echo": body, "x-keel": self.headers.get("x-keel", "")}))

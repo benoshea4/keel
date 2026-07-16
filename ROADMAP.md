@@ -15,6 +15,7 @@ definition of done) and runs in CI.
 | v2 (slice) | **DR**: periodic online snapshots (`--backup-dir`/`--backup-interval-secs`/`--backup-keep`) + one-shot `keel backup`, restore-by-copy runbook. **Cell tenancy**: `keel fleet --config` — one process/db/token per tenant, supervised, crash-only restarts | `smoke_dr.sh`, `smoke_fleet.sh` |
 | v2.1 | **Secrets**: `secret(name)` host call (WIT 0.5.0) — `--secrets-file`, journal stores name + salted sha256 only, replay verifies against the live file (rotation fails loudly), values redacted from journaled HTTP requests. **Cron schedules**: 6-field expressions (UTC, seconds resolution) + `PATCH /api/schedules/{id}` pause/resume. **Per-call `timeout-ms`** on http-request | `smoke_secrets.sh`, extended `smoke_effects.sh` |
 | v2.2 | **Crate split**: `keel-core` library (open/recover, upload, start, inspect — the binary is one consumer); "embeddable" is now literal. **Capability providers** (WIT 0.6.0, [PROVIDERS.md](PROVIDERS.md)): import-free `keel:provider` components registered via `--provider name=path.wasm` (per-tenant in fleets), journaled as `custom:<name>:<kind>`, memory+CPU bounded, failures as data | `smoke_embedded.sh`, `smoke_providers.sh`, extended `smoke_fleet.sh` |
+| v2.3 | **KV versioning**: append-only `(workflow_id, key, seq, value)`; reads take the highest version, upgrades discard tail versions with the journal tail (the documented kv-vs-upgrade caveat is CLOSED), checkpoints compact superseded versions. **Idempotency keys**: `keel-idempotency-key: <workflow_id>:<seq>` on every http-request — wire-only (old journals replay untouched), stable across replay/re-send, guest-overridable, opt-out via empty value. No WIT bump | `smoke_kv_upgrade.sh`, extended `smoke_effects.sh` |
 
 ## Answered design questions
 
@@ -34,18 +35,6 @@ definition of done) and runs in CI.
 ## Next
 
 One WIT bump per stage, never two.
-
-### v2.3 — journal semantics
-
-- **KV versioning** — append-only `(workflow_id, key, seq, value)`; reads
-  resolve latest-at-or-below the current seq; upgrade tail-discard drops
-  rows above C. Closes the documented kv-vs-upgrade caveat (docs/guests.md).
-  Compaction rides the retention GC.
-  *Gate:* an upgrade smoke asserting kv rolls back with the tail.
-- **Idempotency keys** — the engine injects
-  `keel-idempotency-key: <workflow_id>:<seq>` on http-request (opt-out), so
-  remotes can dedupe the at-least-once window; documented server-side pattern.
-  *Gate:* stub that dedupes by key.
 
 ### v2.4 — surface & scale polish
 

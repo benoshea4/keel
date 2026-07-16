@@ -1,0 +1,26 @@
+# v2.3 acceptance guest (v2 of the pair) — resume() reads kv FIRST and reports
+# what it sees: after the upgrade tail-discard it must be the BELOW-checkpoint
+# value — the proof that kv versions roll back with the journal tail.
+
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "kvup2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:kvup2"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"

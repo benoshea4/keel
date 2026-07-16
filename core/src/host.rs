@@ -201,6 +201,14 @@ impl keel::workflow::host_api::Host for Ctx {
             retry_attempts,
             timeout_ms,
         };
+        // v2.3 — idempotency key, injected ON THE WIRE ONLY (the journaled
+        // request keeps exactly what the guest asked, so pre-v2.3 journals
+        // replay unchanged; the key is derivable anyway: it IS this row's
+        // workflow_id:seq). Deterministic across replay and REUSED by a
+        // recovery re-send — which is the point: the remote can collapse the
+        // at-least-once window by deduping on it. Guests opt out by passing
+        // the header with an empty value, or override it with their own.
+        let wire_headers = inject_idempotency_key(headers, &self.j.workflow_id, self.j.next_seq);
         let r = self
             .j
             .journaled("http-request", &req, move || {
@@ -209,7 +217,7 @@ impl keel::workflow::host_api::Host for Ctx {
                         &agent,
                         &method,
                         &url,
-                        &headers,
+                        &wire_headers,
                         body.as_deref(),
                         retry_attempts,
                         timeout_ms,
@@ -714,6 +722,32 @@ fn read_response(resp: ureq::Response) -> Result<HttpOut, String> {
     Ok((status, headers, String::from_utf8_lossy(&buf).into_owned()))
 }
 
+/// v2.3 — the wire-side idempotency header for http-request. `seq` is the
+/// journal seq this call is about to claim, so `<workflow_id>:<seq>` is
+/// stable across replay AND across the crash-and-resend window (recovery
+/// re-executes the same seq → same key → the remote can dedupe). The guest
+/// passing the header itself wins; an EMPTY value means "send no key at all".
+fn inject_idempotency_key(
+    mut headers: Vec<(String, String)>,
+    workflow_id: &str,
+    seq: i64,
+) -> Vec<(String, String)> {
+    match headers
+        .iter()
+        .position(|(k, _)| k.eq_ignore_ascii_case("keel-idempotency-key"))
+    {
+        Some(i) if headers[i].1.is_empty() => {
+            headers.remove(i); // explicit opt-out
+        }
+        Some(_) => {} // guest-supplied key wins
+        None => headers.push((
+            "keel-idempotency-key".to_string(),
+            format!("{workflow_id}:{seq}"),
+        )),
+    }
+    headers
+}
+
 // --- Secrets (v2.1) ---------------------------------------------------------
 
 /// hex(sha256(salt-hex ‖ value)) — what the journal stores instead of a
@@ -867,6 +901,27 @@ mod tests {
             "Bearer {{secret:tok}}"
         );
         assert_eq!(redact("no secrets here", &secrets), "no secrets here");
+    }
+
+    #[test]
+    fn idempotency_key_injected_overridden_or_suppressed() {
+        // No header → injected as workflow_id:seq.
+        let h = inject_idempotency_key(vec![], "wf-1", 7);
+        assert_eq!(h, vec![("keel-idempotency-key".to_string(), "wf-1:7".to_string())]);
+        // Guest-supplied (any case) wins untouched.
+        let h = inject_idempotency_key(
+            vec![("Keel-Idempotency-Key".to_string(), "mine".to_string())],
+            "wf-1",
+            7,
+        );
+        assert_eq!(h, vec![("Keel-Idempotency-Key".to_string(), "mine".to_string())]);
+        // Empty value = suppress entirely.
+        let h = inject_idempotency_key(
+            vec![("keel-idempotency-key".to_string(), String::new())],
+            "wf-1",
+            7,
+        );
+        assert!(h.is_empty());
     }
 
     #[test]

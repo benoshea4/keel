@@ -38,21 +38,26 @@ guest whose every effect replays.)
 | `now-ms()` / `random-u64()` | yes | Wall clock / randomness, recorded so replay sees the same values. |
 | `await-event(name)` | yes | Parks until `POST /api/workflows/{id}/events` delivers a matching event; exactly-once. |
 | `checkpoint(state)` | yes | Snapshots state, prunes the journal below it, enables upgrade + fast recovery. |
-| `kv-set(key, value)` / `kv-get(key)` | yes | Durable per-workflow KV. Reads record what was seen; both are crash-atomic with their journal rows. |
+| `kv-set(key, value)` / `kv-get(key)` | yes | Durable per-workflow KV. Reads record what was seen; both are crash-atomic with their journal rows. Since v2.3 writes append *versions* tied to their journal seq, so an upgrade's tail-discard rolls values back with the tail; superseded versions are compacted at each checkpoint. |
 | `provider-call(name, kind, request)` | yes (`custom:<name>:<kind>`) | Call a capability provider registered on the engine (`--provider name=path.wasm` — see [PROVIDERS.md](../PROVIDERS.md)). Replay returns the recorded response without re-invoking. Unknown name/kind, traps and blown budgets are `err` (data). |
 | `log(msg)` | **no** | Engine log line. Replays re-log — duplicates after recovery are normal. |
 
 ## Sharp edges
 
 - **At-least-once effects:** a crash *between* an effect executing and its
-  journal row committing re-runs the effect on recovery. Make external calls
-  idempotent where it matters (send an idempotency key header).
-- **KV vs. upgrade tail-discard:** an upgrade discards journal rows past the
-  checkpoint, but kv values written by that discarded tail *survive* (kv is
-  state, not journal). The re-executed tail overwrites them deterministically
-  in the common case; if you interleave kv writes and reads across a
-  checkpoint boundary, checkpoint *after* the writes. (KV versioning is
-  roadmapped — ROADMAP.md v2.3.)
+  journal row committing re-runs the effect on recovery. Since v2.3 the
+  engine sends `keel-idempotency-key: <workflow_id>:<seq>` on every
+  `http-request` — stable across replay and across the crash-and-resend
+  window, so a remote that stores processed keys (unique-index the column;
+  return the stored response on conflict) collapses the window to
+  exactly-once. Wire-only: it never appears in the journaled request. Send
+  the header yourself to override the key, or with an empty value to send
+  none. `http-get` does not carry one — prefer `http-request`.
+- **KV vs. upgrade tail-discard — CLOSED in v2.3:** kv writes are versioned
+  by journal seq, and an upgrade discards versions written by the discarded
+  tail together with it, so the upgraded module reads the pre-tail values
+  (`smoke_kv_upgrade.sh` is the proof). One migration note: kv rows written
+  before v2.3 carry version 0, i.e. they are treated as pre-checkpoint state.
 - **Secrets stay out of the journal only on the paths the engine controls.**
   Redaction covers journaled `http-request`/`http-get` *requests*. It cannot
   cover: `checkpoint` state (don't serialize secret values — re-read via

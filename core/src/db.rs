@@ -104,13 +104,19 @@ CREATE INDEX IF NOT EXISTS idx_workflows_created_at
     ON workflows (created_at);
 
 -- v1.2 additions (appended, never ALTERed).
+-- v2.3 reshaped kv to APPEND-ONLY versions: one row per kv-set, seq = the
+-- journal seq of the write. Reads resolve the highest seq; upgrade
+-- tail-discard deletes rows with seq > C, which is what finally closes the
+-- kv-vs-upgrade caveat (values roll back WITH the journal tail). Pre-v2.3
+-- databases are reshaped in migrate() below.
 
 CREATE TABLE IF NOT EXISTS kv (
     workflow_id TEXT NOT NULL REFERENCES workflows(id),
     key         TEXT NOT NULL,
+    seq         INTEGER NOT NULL,           -- journal seq of the kv-set
     value       TEXT NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    PRIMARY KEY (workflow_id, key)
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (workflow_id, key, seq)
 );
 
 CREATE TABLE IF NOT EXISTS schedules (
@@ -127,24 +133,47 @@ CREATE TABLE IF NOT EXISTS schedules (
 
 pub fn migrate(c: &Connection) -> Result<()> {
     c.execute_batch(MIGRATION)?;
-    // v2.1 — the ONE sanctioned way an existing table evolves: an additive,
-    // nullable column, retrofitted onto pre-v2.1 databases here. (The header
-    // rule stands for everything else: append tables/indexes, never reshape.)
+    // v2.1 — the ONE sanctioned way an existing table evolves in place: an
+    // additive, nullable column, retrofitted onto older databases here.
     ensure_column(c, "schedules", "cron", "TEXT")?;
+    // v2.3 — kv went append-only (versioned). A pre-v2.3 kv table (no seq
+    // column) is reshaped once: existing values become version 0, which any
+    // later write out-versions. One transaction; idempotent by the seq check.
+    if !has_column(c, "kv", "seq")? {
+        c.execute_batch(
+            "BEGIN;
+             CREATE TABLE kv_v2 (
+                 workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                 key         TEXT NOT NULL,
+                 seq         INTEGER NOT NULL,
+                 value       TEXT NOT NULL,
+                 created_at  INTEGER NOT NULL,
+                 PRIMARY KEY (workflow_id, key, seq)
+             );
+             INSERT INTO kv_v2 SELECT workflow_id, key, 0, value, updated_at FROM kv;
+             DROP TABLE kv;
+             ALTER TABLE kv_v2 RENAME TO kv;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
-/// ALTER TABLE ... ADD COLUMN, only if the column is missing — CREATE TABLE IF
-/// NOT EXISTS won't touch tables that already exist, so additive columns need
-/// this second pass on databases created before the column landed.
-fn ensure_column(c: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+fn has_column(c: &Connection, table: &str, col: &str) -> Result<bool> {
     let mut stmt = c.prepare(&format!("PRAGMA table_info({table})"))?;
     let present = stmt
         .query_map([], |r| r.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .iter()
         .any(|n| n == col);
-    if !present {
+    Ok(present)
+}
+
+/// ALTER TABLE ... ADD COLUMN, only if the column is missing — CREATE TABLE IF
+/// NOT EXISTS won't touch tables that already exist, so additive columns need
+/// this second pass on databases created before the column landed.
+fn ensure_column(c: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+    if !has_column(c, table, col)? {
         c.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])?;
     }
     Ok(())
@@ -464,11 +493,13 @@ pub fn deliver_event_and_journal(
     Ok(Some(payload))
 }
 
-// --- KV (v1.2) -------------------------------------------------------------------
+// --- KV (v1.2; append-only versions since v2.3) ------------------------------------
 // Same discipline as event delivery: the state write and its journal row are ONE
 // transaction, and the caller (host.rs) runs the replay check first.
 
-/// kv-set's live path: upsert the key and journal the call atomically.
+/// kv-set's live path: APPEND a version row (seq = this call's journal seq)
+/// and journal the call atomically. Never updates in place — versioning is
+/// what lets an upgrade's tail-discard roll values back (v2.3).
 pub fn kv_set_and_journal(
     c: &mut Connection,
     workflow_id: &str,
@@ -479,17 +510,18 @@ pub fn kv_set_and_journal(
 ) -> Result<()> {
     let tx = c.transaction()?;
     tx.execute(
-        "INSERT INTO kv (workflow_id, key, value, updated_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (workflow_id, key) DO UPDATE SET value = ?3, updated_at = ?4",
-        rusqlite::params![workflow_id, key, value, now_ms()],
+        "INSERT INTO kv (workflow_id, key, seq, value, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![workflow_id, key, seq, value, now_ms()],
     )?;
     insert_journal_row(&tx, workflow_id, seq, "kv-set", req_json, "{}")?;
     tx.commit()?;
     Ok(())
 }
 
-/// kv-get's live path: read the key and journal what was read atomically —
-/// replay then returns the recorded value even if the row changed later.
+/// kv-get's live path: read the HIGHEST version of the key and journal what
+/// was read atomically — replay then returns the recorded value even if more
+/// versions land later. (Live reads only ever happen at the execution head,
+/// so highest version ≡ current value.)
 pub fn kv_get_and_journal(
     c: &mut Connection,
     workflow_id: &str,
@@ -500,7 +532,8 @@ pub fn kv_get_and_journal(
     let tx = c.transaction()?;
     let v: Option<String> = tx
         .query_row(
-            "SELECT value FROM kv WHERE workflow_id = ?1 AND key = ?2",
+            "SELECT value FROM kv WHERE workflow_id = ?1 AND key = ?2
+             ORDER BY seq DESC LIMIT 1",
             rusqlite::params![workflow_id, key],
             |r| r.get(0),
         )
@@ -509,6 +542,21 @@ pub fn kv_get_and_journal(
     insert_journal_row(&tx, workflow_id, seq, "kv-get", req_json, &resp)?;
     tx.commit()?;
     Ok(v)
+}
+
+/// Latest value per key for a workflow (the UI/read-model view of kv).
+pub fn kv_latest(c: &Connection, workflow_id: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = c.prepare(
+        "SELECT key, value FROM kv k
+         WHERE workflow_id = ?1
+           AND seq = (SELECT MAX(seq) FROM kv k2
+                      WHERE k2.workflow_id = k.workflow_id AND k2.key = k.key)
+         ORDER BY key",
+    )?;
+    let rows = stmt
+        .query_map([workflow_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 // --- Schedules (v1.2) --------------------------------------------------------------
@@ -707,6 +755,19 @@ pub fn snapshot_and_prune(
         "DELETE FROM journal WHERE workflow_id = ?1 AND seq < ?2",
         rusqlite::params![workflow_id, c_seq],
     )?;
+    // v2.3 — kv compaction rides the checkpoint: superseded versions can
+    // never be read again (live reads take the highest version; an upgrade
+    // discards only seq > C_snapshot, and the surviving latest version is
+    // always ≤ the snapshot's C, because writes after it out-version it only
+    // at seqs a later tail-discard would remove together with this row's
+    // supersessors). Long-lived workflows stop accumulating dead versions.
+    tx.execute(
+        "DELETE FROM kv WHERE workflow_id = ?1 AND seq < (
+             SELECT MAX(seq) FROM kv AS k2
+             WHERE k2.workflow_id = ?1 AND k2.key = kv.key
+         )",
+        rusqlite::params![workflow_id],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -752,6 +813,12 @@ pub fn upgrade_module_txn(
     let tx = c.transaction()?;
     tx.execute(
         "DELETE FROM journal WHERE workflow_id = ?1 AND seq > ?2",
+        rusqlite::params![workflow_id, c_seq],
+    )?;
+    // v2.3 — kv versions written by the discarded tail roll back WITH it
+    // (this line is what closed the old kv-vs-upgrade caveat in guests.md).
+    tx.execute(
+        "DELETE FROM kv WHERE workflow_id = ?1 AND seq > ?2",
         rusqlite::params![workflow_id, c_seq],
     )?;
     tx.execute("DELETE FROM timers WHERE workflow_id = ?1", [workflow_id])?;
@@ -899,6 +966,95 @@ mod tests {
         assert_eq!(event_row(&c, 3), (0, None), "queued event untouched");
         assert_eq!(get_workflow(&c, "w").unwrap().unwrap().module_hash, "v2");
         assert_eq!(get_snapshot(&c, "w").unwrap().unwrap().module_hash, "v2");
+    }
+
+    fn kv_all(c: &Connection, id: &str) -> Vec<(String, i64, String)> {
+        let mut stmt = c
+            .prepare("SELECT key, seq, value FROM kv WHERE workflow_id = ?1 ORDER BY key, seq")
+            .unwrap();
+        stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn kv_is_versioned_reads_latest_and_upgrade_discards_the_tail() {
+        let mut c = mem();
+        wf(&c, "w", "v1");
+        insert_module(&c, "v2", "m2", b"\0asm2").unwrap();
+        kv_set_and_journal(&mut c, "w", 0, "k", "a", "{}").unwrap();
+        // checkpoint at C=1 (journal row C is the wrapper's business; the txn
+        // here is what prunes + compacts)
+        snapshot_and_prune(&mut c, "w", 1, b"s").unwrap();
+        kv_set_and_journal(&mut c, "w", 2, "k", "b", "{}").unwrap();
+
+        let got = kv_get_and_journal(&mut c, "w", 3, "k", "{}").unwrap();
+        assert_eq!(got.as_deref(), Some("b"), "reads resolve the highest version");
+        assert_eq!(
+            kv_all(&c, "w"),
+            vec![
+                ("k".to_string(), 0, "a".to_string()),
+                ("k".to_string(), 2, "b".to_string())
+            ],
+            "both versions live until compaction/upgrade"
+        );
+
+        upgrade_module_txn(&mut c, "w", 1, "v2").unwrap();
+        assert_eq!(
+            kv_all(&c, "w"),
+            vec![("k".to_string(), 0, "a".to_string())],
+            "tail versions (seq > C) roll back with the journal tail"
+        );
+        let got = kv_get_and_journal(&mut c, "w", 2, "k", "{}").unwrap();
+        assert_eq!(got.as_deref(), Some("a"), "post-upgrade read sees the pre-tail value");
+    }
+
+    #[test]
+    fn checkpoint_compacts_superseded_kv_versions() {
+        let mut c = mem();
+        wf(&c, "w", "h");
+        kv_set_and_journal(&mut c, "w", 0, "k", "a", "{}").unwrap();
+        kv_set_and_journal(&mut c, "w", 1, "k", "b", "{}").unwrap();
+        kv_set_and_journal(&mut c, "w", 2, "other", "x", "{}").unwrap();
+        snapshot_and_prune(&mut c, "w", 3, b"s").unwrap();
+        assert_eq!(
+            kv_all(&c, "w"),
+            vec![
+                ("k".to_string(), 1, "b".to_string()),
+                ("other".to_string(), 2, "x".to_string())
+            ],
+            "only the latest version per key survives a checkpoint"
+        );
+    }
+
+    #[test]
+    fn migrate_reshapes_pre_v23_kv() {
+        // A faithful pre-v2.3 database: valid module/workflow references and
+        // the old single-row-per-key kv shape.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE modules (hash TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+                wasm BLOB NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE workflows (id TEXT PRIMARY KEY,
+                module_hash TEXT NOT NULL REFERENCES modules(hash), input TEXT NOT NULL,
+                status TEXT NOT NULL, output TEXT, created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL);
+             CREATE TABLE kv (workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                PRIMARY KEY (workflow_id, key));
+             INSERT INTO modules VALUES ('h', 'm', x'00', 0);
+             INSERT INTO workflows VALUES ('w', 'h', '{}', 'running', NULL, 0, 0);
+             INSERT INTO kv VALUES ('w', 'k', 'old', 42);",
+        )
+        .unwrap();
+        migrate(&c).unwrap();
+        migrate(&c).unwrap(); // idempotent
+        assert_eq!(
+            kv_all(&c, "w"),
+            vec![("k".to_string(), 0, "old".to_string())],
+            "pre-v2.3 rows become version 0"
+        );
     }
 
     #[test]

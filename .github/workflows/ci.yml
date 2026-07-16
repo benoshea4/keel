@@ -60,6 +60,8 @@ jobs:
         run: ./scripts/smoke_embedded.sh
       - name: Capability providers smoke (v2.2)
         run: ./scripts/smoke_providers.sh
+      - name: KV-versioning upgrade smoke (v2.3)
+        run: ./scripts/smoke_kv_upgrade.sh
       - name: Engine log on failure
         if: failure()
         run: tail -100 engine.log || true

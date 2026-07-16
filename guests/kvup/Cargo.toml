@@ -1,0 +1,26 @@
+# v2.3 acceptance guest (v1 of the pair) — writes kv BELOW a checkpoint, then
+# ABOVE it, then parks on an event so scripts/smoke_kv_upgrade.sh can upgrade
+# it to kvup2. The upgrade's tail-discard must roll the post-checkpoint kv
+# write back (kv versioning) — kvup2's resume() reads what survived.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "kvup"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:kvup"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"

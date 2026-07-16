@@ -41,6 +41,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_secrets.sh                          # must print SECRETS SMOKE PASS (v2.1)
 ./scripts/smoke_embedded.sh                         # must print EMBEDDED SMOKE PASS (v2.2 crate split)
 ./scripts/smoke_providers.sh                        # must print PROVIDERS SMOKE PASS (v2.2)
+./scripts/smoke_kv_upgrade.sh                       # must print KV-UPGRADE SMOKE PASS (v2.3)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -324,6 +325,32 @@ I. *(v2.2, 2026-07-16 — crate split + capability providers, WIT 0.6.0)*
      unregistered provider errs as data), `smoke_fleet.sh` extended
      (provider on tenant A completes, same guest on tenant B fails with
      "no provider 'greet'"). CI lint/test now --workspace.
+
+J. *(v2.3, 2026-07-16 — kv versioning + idempotency keys; NO WIT bump)*
+   - **KV is append-only versions**: `kv (workflow_id, key, seq, value)`,
+     seq = the writing kv-set's journal seq. Live reads take the highest
+     version (live reads only happen at the execution head, so highest ≡
+     current); `upgrade_module_txn` deletes versions with seq > C together
+     with the journal tail — THE kv-vs-upgrade caveat from G is CLOSED
+     (guests.md rewritten). `snapshot_and_prune` compacts superseded
+     versions at each checkpoint (safe: the surviving latest version is
+     always ≤ the snapshot C any future upgrade will use). Pre-v2.3 tables
+     are reshaped once in migrate() (has_column check; old rows become
+     version 0 = "pre-checkpoint"). `db::kv_latest` added for the v2.4 UI.
+   - **Idempotency keys, wire-only**: http-request sends
+     `keel-idempotency-key: <workflow_id>:<seq>` (the seq the call is about
+     to claim — stable across replay AND the crash-and-resend window).
+     Injected into the WIRE headers only; the journaled request keeps
+     exactly what the guest passed, so pre-v2.3 journals replay unchanged
+     and the key stays derivable from the row. Guest-supplied header wins;
+     empty value = send none. http-get carries none (legacy).
+   - Gates: `smoke_kv_upgrade.sh` (kvup→kvup2: two versions before upgrade,
+     tail version discarded by it, v2 resume reads "below", exactly one
+     surviving version), `smoke_effects.sh` extended (stub-observed key ==
+     "<wf>:1", journal http-request rows never contain the header, kv
+     version count assertions). 31 unit tests (kv versioned read/upgrade
+     discard, checkpoint compaction, pre-v2.3 reshape, key injection
+     inject/override/suppress).
 
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant
