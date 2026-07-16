@@ -77,18 +77,45 @@ curl -s -X POST localhost:8080/api/workflows/<id>/upgrade \
 
 The engine aborts the parked worker at its park point, discards the journal tail
 beyond the checkpoint (re-queueing any events that tail had consumed), points the
-workflow at the new module, and resumes it from the checkpoint state. One
-documented wrinkle: an in-flight sleep restarts from `resume` with a fresh full
-duration after an upgrade, because its timer and journal tail were discarded.
-`scripts/accept_phase3.sh` proves pruning, resume-based recovery, and a v1→v2
-upgrade mid-workflow.
+workflow at the new module, and resumes it from the checkpoint state. The upgrade
+pre-flights the new module (compile + world check) before touching anything, so a
+bad hash can never brick a workflow. One documented wrinkle: an in-flight sleep
+restarts from `resume` with a fresh full duration after an upgrade, because its
+timer and journal tail were discarded. `scripts/accept_phase3.sh` proves pruning,
+resume-based recovery, and a v1→v2 upgrade mid-workflow.
 
-## Known, accepted limitation: runaway guests
+## Cancelling workflows
 
-Runaway-guest protection is a non-goal: a guest that spins in pure compute without
-host calls pins its thread forever and even upgrade cannot abort it, since aborts are
-only observed at park points and host calls — this is a KNOWN, ACCEPTED limitation;
-the production fix is wasmtime epoch interruption, explicitly deferred.
+Any non-terminal workflow can be cancelled; it lands in `failed` with output
+`cancelled by operator`:
+
+```bash
+curl -s -X POST localhost:8080/api/workflows/<id>/cancel     # -> 200
+```
+
+Parked workflows abort immediately at their park point. Guests spinning in pure
+wasm (`loop {}`) are stopped too: the engine runs wasmtime epoch interruption
+with a 1-second tick, and an abort flag traps the guest at the next tick. The one
+gap: a guest blocked inside a long host call (an in-flight HTTP GET) can't be
+interrupted mid-call — cancel answers 409, retry once the call returns.
+`scripts/smoke_cancel.sh` proves both paths against `guests/counter` (parked)
+and `guests/spin` (spinning).
+
+## Tests
+
+`cargo test -p keel-engine` runs unit tests for the journal replay/nondeterminism
+core and the multi-statement transactions (event delivery, upgrade tail-discard,
+sleep wake, cancel) against in-memory SQLite. The four scripts under `scripts/`
+are the end-to-end gates; all of it runs in CI on every push
+(`.github/workflows/ci.yml`) — fully offline, phase 1 fetches a local stub.
+
+## Scope and security posture
+
+Keel binds `127.0.0.1` by default and has **no authentication**: anyone who can
+reach the port can upload and execute arbitrary WASM, and the guest `http-get`
+capability will fetch any URL the engine's host can reach (including internal
+addresses). Keep it on loopback, or put an authenticating proxy in front of it
+before choosing `--listen` on a wider interface.
 
 Other non-goals (all phases): multi-node clustering, authentication, TLS, HTTP methods
 other than GET in the guest API, streaming bodies, physical linear-memory snapshots,

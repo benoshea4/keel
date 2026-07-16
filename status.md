@@ -17,17 +17,23 @@ verified, and every deviation from the spec and why.
 - Phase 3 (checkpoints, pruning, live upgrade): `PHASE 3 PASS` ×2 on 2026-07-16.
 - All three suites re-ran green at HEAD (fresh DBs) after the last commit — the
   phase-3 WIT/runner changes did not regress earlier phases.
+- **Post-review hardening landed 2026-07-16** (see "Post-review hardening" below):
+  unit tests, cancel endpoint + epoch interruption, upgrade pre-flight, atomic
+  wake txn, panic guard, indexes, hardened scripts (offline, self-cleaning), CI.
 
 Build/run cheatsheet (run from this directory, `keel/`):
 
 ```bash
 cargo build --release -p keel-engine                # engine → target/release/keel
+cargo test --release -p keel-engine                 # unit tests (in-memory SQLite)
 (cd guests/demo && cargo component build --release --target wasm32-unknown-unknown)
 (cd guests/approval && cargo component build --release --target wasm32-unknown-unknown)
 (cd guests/counter && cargo component build --release --target wasm32-unknown-unknown)  # +--features v2
-./scripts/accept_phase1.sh                          # must print PHASE 1 PASS
+(cd guests/spin && cargo component build --release --target wasm32-unknown-unknown)
+./scripts/accept_phase1.sh                          # must print PHASE 1 PASS (offline — local stub)
 ./scripts/accept_phase2.sh                          # must print PHASE 2 PASS
 ./scripts/accept_phase3.sh                          # must print PHASE 3 PASS
+./scripts/smoke_cancel.sh                           # must print CANCEL SMOKE PASS
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -160,6 +166,56 @@ Non-deviations worth knowing: `component-model` is a default wasmtime-43 feature
 spec's FALLBACK note applies but the explicit feature is harmless); `bindgen!` found
 the wit dir at `path: "../wit"` without needing the engine/wit copy fallback.
 
+## Post-review hardening (2026-07-16, after the spec was fully built)
+
+An adversarial code review of the finished build demanded six fixes; all landed.
+These are review-driven changes, not spec tasks — where they touch spec-verbatim
+material it is noted.
+
+A. **Scripts self-clean and run offline.** All acceptance scripts now: `trap`
+   cleanup (a FAILING run no longer leaks a live server holding :8080 that the
+   next run's curls would silently hit), a :8080 preflight, readiness polling
+   after every engine launch (no more `sleep 1` startup races), and phase 1
+   fetches a LOCAL stub (`python3 -m http.server` on :18080 serving
+   `scripts/stub/`) instead of example.com — the demo guest now reads its fetch
+   url from the workflow input (`{"url": ...}`, defaulting to example.com for
+   bare runs). The phase-1 script is therefore no longer spec-verbatim: the
+   ASSERTIONS are unchanged; only the harness was hardened.
+B. **Upload validation + upgrade pre-flight (the brick fix).** `/api/modules`
+   rejects bodies without the `\0asm` magic (400). The upgrade handler runs
+   `runner::preflight` (compile + `Linker::instantiate_pre` import check +
+   `WorkflowPre::new` export/type check — no guest code runs) BEFORE the
+   destructive tail-discard txn. Previously, upgrading a healthy workflow to a
+   module that couldn't start discarded its tail and then failed at respawn —
+   permanently, since failed is terminal.
+C. **Unit tests** (`cargo test -p keel-engine`, in-memory SQLite): journaled()
+   live/replay/kind-mismatch/request-mismatch/failed-exec, event delivery
+   (oldest-first, exactly-once, in-txn status flip), `finish_sleep`,
+   `upgrade_module_txn` (tail discard + event UN-delivery + repoint), and
+   `finish_cancel`. The un-delivery UPDATE now runs under a test.
+D. **Atomic wake transactions.** The sleep wake-up (timer delete + journal
+   insert + status flip) is ONE txn — `db::finish_sleep` — closing the crash
+   window that silently turned remainder-sleep into full re-sleep. The
+   await-event delivery txn also flips status running inside the txn now.
+   (`set_status` remains the only status writer — it runs against the txn.)
+E. **Cancel endpoint + epoch interruption.** `POST /api/workflows/{id}/cancel`
+   → 200, workflow becomes `failed` with output `cancelled by operator`
+   (timer cleaned in the same txn — `db::finish_cancel`); terminal workflows
+   409. Parked workflows abort via the park loops; guests spinning in PURE WASM
+   are trapped by the epoch-deadline callback (engine ticks 1/s; the callback
+   re-arms unless the abort flag is set, then raises AbortForUpgrade through
+   the same silent-exit chain). Cancel shares the upgrade claim set (no
+   interleaving) and `abort_and_join` (api.rs) is the shared bounded-join.
+   `guests/spin` (a `loop {}` guest) exists to regression-test this.
+F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
+   failed status + registry/notifier cleanup on the panic path; poison-tolerant
+   locking on the exit path and Permit::drop). Two indexes (events park-loop
+   lookup, workflows created_at). Notifier entries are removed at thread exit
+   (the map no longer grows forever). The workflow page surfaces API error
+   bodies from its hx-swap="none" forms (htmx responseError/sendError listeners
+   + an `.error` box). CI (`.github/workflows/ci.yml`): clippy -D warnings +
+   unit tests, then all four scripts on ubuntu-latest.
+
 One WIT-versioning caveat for later phases: bumping the package to 0.2.0 required
 REBUILDING both guests (bindings.rs is generated from the wit). "Adding an import is
 non-breaking" is a source-level promise — an old `.wasm` BLOB compiled against
@@ -178,7 +234,8 @@ keel/
 ├── Cargo.toml               workspace = ["engine"], exclude guests (deviation 5)
 ├── SPEC.md                  the build spec — THE source of truth
 ├── status.md                this file
-├── README.md                includes the REQUIRED verbatim runaway-guest warning (§0 non-goals)
+├── README.md                quick start + cancel/tests/security sections (the spec's verbatim
+│                            runaway-guest warning was retired by hardening E — it is no longer true)
 ├── wit/workflow.wit         0.3.0 contract: http-get/sleep-ms/now-ms/random-u64/await-event/
 │                            checkpoint/log imports; run + resume exports
 ├── engine/
@@ -193,15 +250,20 @@ keel/
 │       ├── notifier.rs      condvar wake-ups + abort set (latency only, never correctness)
 │       ├── runner.rs        EngineShared + thread-per-workflow + Permit cap + thread registry +
 │       │                    snapshot-aware start (resume) + abort-sentinel result match
-│       ├── api.rs           JSON API, 6 endpoints incl. upgrade; several also accept form/multipart
+│       ├── api.rs           JSON API, 7 endpoints incl. upgrade + cancel; several also accept form/multipart
 │       └── ui.rs            askama-render-to-Html handlers + embedded assets + upgrade control
-├── guests/demo/             Task 1.6 acceptance guest (src/bindings.rs is GENERATED — don't edit)
+├── guests/demo/             Task 1.6 acceptance guest (src/bindings.rs is GENERATED — don't edit);
+│                            fetch url read from input {"url": ...} (hardening A)
 ├── guests/approval/         Task 2.9 acceptance guest: await-event("approve") → sleep 60s → output
 ├── guests/counter/          Task 3.7 acceptance guest: v1/v2 via feature flag; ticks + checkpoints
+├── guests/spin/             cancel-me fixture: spins in pure wasm forever (hardening E)
+├── .github/workflows/ci.yml clippy -D warnings + unit tests + all four scripts (hardening F)
 └── scripts/
-    ├── accept_phase1.sh     Task 1.7 — spec-verbatim acceptance
+    ├── accept_phase1.sh     Task 1.7 assertions; harness hardened (trap/readiness/local stub)
     ├── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
-    └── accept_phase3.sh     Task 3.8 — pruning; resume recovery; v1→v2 live upgrade; 409 negative
+    ├── accept_phase3.sh     Task 3.8 — pruning; resume recovery; v1→v2 live upgrade; 409 negative
+    ├── smoke_cancel.sh      cancel both ways: parked (park loop) + spinning (epoch trap)
+    └── stub/body.txt        fixed body served on :18080 by accept_phase1.sh
 ```
 
 Read the header comment of each file first — they carry the invariants and mark every
@@ -220,6 +282,8 @@ PHASE 2 / PHASE 3 surgery point with the task number.
 6. `runner::spawn` call-sites: api.rs creation, main.rs recovery scan, phase-3 upgrade
    handler step 5. Never anywhere else.
 7. Acceptance scripts are the definition of done. Fix the engine, never the script.
+   (The 2026-07-16 hardening changed the scripts' HARNESS — cleanup, readiness,
+   local stub — never their assertions. That distinction is the line.)
 8. Commit per numbered task, message = "task number + name".
 
 ---
@@ -270,6 +334,19 @@ PHASE 2 / PHASE 3 surgery point with the task number.
 - After the final commit, ALL THREE suites were re-run at HEAD in sequence:
   `PHASE 1 PASS`, `PHASE 2 PASS`, `PHASE 3 PASS` — no cross-phase regressions.
 
+Post-review hardening verification (2026-07-16):
+
+- `cargo clippy --release -p keel-engine --all-targets -- -D warnings`: clean.
+- `cargo test --release -p keel-engine`: **8/8 pass** (journaled() ×4, event
+  delivery, finish_sleep, upgrade txn incl. un-delivery, finish_cancel).
+- `scripts/smoke_cancel.sh`: **CANCEL SMOKE PASS** — a sleeping counter AND a
+  pure-wasm spinner both cancelled (200 → failed/"cancelled by operator"); the
+  spinner proves the epoch-deadline → AbortForUpgrade → silent-exit chain works
+  end to end. Junk upload → 400; re-cancel → 409; timers table empty after.
+- All three phase gates re-run green with every hardening change in place
+  (phase 1 fully offline via the stub): `PHASE 1 PASS`, `PHASE 2 PASS`,
+  `PHASE 3 PASS`, sequentially, fresh DBs.
+
 Git history note: phase 1 was built in a single pass and committed per-task
 afterwards; individual historical commits group files by task but were not each
 built in isolation. Phases 2 and 3 WERE built task-by-task (each numbered task
@@ -287,18 +364,23 @@ rails:
   Connection from `db::open_conn`; every workflows status write through
   `db::set_status`; `runner::spawn` only from its three call-sites (api.rs
   creation, main.rs recovery, api.rs upgrade step 5).
-- **The acceptance scripts are the regression suite.** Run all three after any
-  engine change; they are the definition of "still works". They need network
-  (example.com), port 8080 free, and `cargo-component` on PATH (~/.cargo/bin).
+- **The regression suite is: `cargo test -p keel-engine`, then all three phase
+  scripts, then `smoke_cancel.sh`.** Run them after any engine change; CI runs
+  the same set on every push to main. They need port 8080 free (and 18080 for
+  phase 1's stub) and `cargo-component` on PATH (~/.cargo/bin) — no public
+  internet.
 - **Extending the WIT**: adding an import is source-compatible but old uploaded
   .wasm BLOBS keyed to an older interface version will not instantiate (see the
   WIT-versioning caveat above). Adding/renaming exports is breaking for all
   guests. Journal `kind`/payload shapes (§4.2) are ON-DISK format — never rename.
 - **Known accepted limitations** (spec non-goals — do not "fix" casually):
-  runaway guests pin their thread (epoch interruption deferred); at-least-once
-  effects on crash between exec and journal INSERT; parked workflows hold
-  --max-running permits; a mid-sleep upgrade restarts the sleep in full;
-  no auth/TLS/clustering/metrics; guest HTTP is GET-only.
+  at-least-once effects on crash between exec and journal INSERT; parked
+  workflows hold --max-running permits; a mid-sleep upgrade restarts the sleep
+  in full; no auth/TLS/clustering/metrics; guest HTTP is GET-only, capped at
+  1 MiB with silent truncation. (Runaway guests are NO LONGER unstoppable —
+  epoch interruption + the cancel endpoint landed in the 2026-07-16 hardening.
+  A guest blocked in a long HOST call still can't be interrupted mid-call;
+  cancel answers 409 "busy executing", retry after the call returns.)
 - **Upgrade machinery subtleties** live in deviations 13–15 — read them before
   touching host.rs checkpoint, the thread registry, or api.rs upgrade_workflow.
 
@@ -316,5 +398,8 @@ rails:
   set (should be impossible — the handler clears it on every path; see dev. 15).
 - Consult the Troubleshooting table at the bottom of SPEC.md BEFORE improvising —
   most "weird" failures are listed there with fixes.
-- Kill a stray engine: `pkill -f 'keel serve'` (acceptance scripts leave none on
-  success, but a failed run can).
+- Kill a stray engine: `pkill -f 'keel serve'` (since the 2026-07-16 hardening
+  the scripts trap-clean their engine (and phase 1 its stub) on EVERY exit,
+  success or failure — a stray keel means someone ran it by hand).
+- A workflow you just want GONE: `POST /api/workflows/<id>/cancel` — works on
+  parked AND spinning guests; 409 if it is mid-host-call (retry) or terminal.

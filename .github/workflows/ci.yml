@@ -1,0 +1,51 @@
+# Post-review hardening: the definition of done must run somewhere other than
+# one laptop. Two jobs:
+#   * lint-and-unit — clippy (warnings are errors) + the in-memory-SQLite unit
+#     tests for journaled() replay/mismatch and the db.rs transactions.
+#   * acceptance — the real gates: all three phase scripts plus the cancel
+#     smoke, sequentially (they share :8080 and engine.log). Phase 1 uses the
+#     local stub, so no job here needs the public internet beyond fetching
+#     toolchains and crates.
+name: ci
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --release -p keel-engine --all-targets -- -D warnings
+      - run: cargo test --release -p keel-engine
+
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-component
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-component@0.21.1
+      - name: Phase 1 acceptance (journal replay + crash recovery)
+        run: ./scripts/accept_phase1.sh
+      - name: Phase 2 acceptance (durable timers + events + UI)
+        run: ./scripts/accept_phase2.sh
+      - name: Phase 3 acceptance (checkpoints + live upgrade)
+        run: ./scripts/accept_phase3.sh
+      - name: Cancel smoke (parked + spinning guest)
+        run: ./scripts/smoke_cancel.sh
+      - name: Engine log on failure
+        if: failure()
+        run: tail -100 engine.log || true
