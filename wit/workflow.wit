@@ -1,8 +1,9 @@
-// The ONLY contract between engine and guests (SPEC.md §4 + Task 2.1).
-// 0.2.0 added await-event (a new import — non-breaking; guests that don't call it
-// keep working once rebuilt). Phase 3 bumps to 0.3.0 (adds checkpoint + a resume
-// export — THAT one is breaking). Never edit an interface in place mid-phase.
-package keel:workflow@0.2.0;
+// The ONLY contract between engine and guests (SPEC.md §4 + Tasks 2.1, 3.1).
+// 0.2.0 added await-event (a new import — non-breaking once guests rebuilt).
+// 0.3.0 added checkpoint + the resume EXPORT — a BREAKING change: every guest must
+// implement resume (a stub `Err("no checkpoints")` suffices) and be rebuilt.
+// Never edit an interface in place mid-phase.
+package keel:workflow@0.3.0;
 
 interface host-api {
     /// Journaled HTTP GET. ok = response body (utf-8, truncated by host to 1 MiB),
@@ -22,6 +23,13 @@ interface host-api {
     /// via POST /api/workflows/:id/events. Returns the event payload (JSON string).
     await-event: func(name: string) -> string;
 
+    /// Journaled. The guest hands the engine a self-serialized state blob at a safe
+    /// point. Contract: state must fully determine all FUTURE host calls the guest
+    /// will make (given replayed results). The engine may later restart the guest
+    /// via resume(state) instead of run(input), and prunes journal rows older than
+    /// the checkpoint.
+    checkpoint: func(state: list<u8>);
+
     /// NOT journaled as an effect: forwarded to engine logs, tagged with the
     /// workflow id. Free to call; returns nothing; identical on replay by
     /// construction (log is simply not sequence-numbered at all — see SPEC.md §4.1).
@@ -33,4 +41,8 @@ world workflow {
 
     /// Entry point. input/output are JSON strings (engine treats them as opaque).
     export run: func(input: string) -> result<string, string>;
+
+    /// Continue from a checkpointed state blob. Guests that never call checkpoint
+    /// implement this as: return Err("no checkpoints").
+    export resume: func(state: list<u8>) -> result<string, string>;
 }

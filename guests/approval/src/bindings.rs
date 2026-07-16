@@ -50,9 +50,60 @@ pub unsafe fn __post_return_run<T: Guest>(arg0: *mut u8) {
         }
     }
 }
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub unsafe fn _export_resume_cabi<T: Guest>(arg0: *mut u8, arg1: usize) -> *mut u8 {
+    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+    let len0 = arg1;
+    let result1 = T::resume(_rt::Vec::from_raw_parts(arg0.cast(), len0, len0));
+    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+    match result1 {
+        Ok(e) => {
+            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+            let vec3 = (e.into_bytes()).into_boxed_slice();
+            let ptr3 = vec3.as_ptr().cast::<u8>();
+            let len3 = vec3.len();
+            ::core::mem::forget(vec3);
+            *ptr2.add(2 * ::core::mem::size_of::<*const u8>()).cast::<usize>() = len3;
+            *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = ptr3
+                .cast_mut();
+        }
+        Err(e) => {
+            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+            let vec4 = (e.into_bytes()).into_boxed_slice();
+            let ptr4 = vec4.as_ptr().cast::<u8>();
+            let len4 = vec4.len();
+            ::core::mem::forget(vec4);
+            *ptr2.add(2 * ::core::mem::size_of::<*const u8>()).cast::<usize>() = len4;
+            *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = ptr4
+                .cast_mut();
+        }
+    };
+    ptr2
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub unsafe fn __post_return_resume<T: Guest>(arg0: *mut u8) {
+    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+    match l0 {
+        0 => {
+            let l1 = *arg0.add(::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
+            let l2 = *arg0.add(2 * ::core::mem::size_of::<*const u8>()).cast::<usize>();
+            _rt::cabi_dealloc(l1, l2, 1);
+        }
+        _ => {
+            let l3 = *arg0.add(::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
+            let l4 = *arg0.add(2 * ::core::mem::size_of::<*const u8>()).cast::<usize>();
+            _rt::cabi_dealloc(l3, l4, 1);
+        }
+    }
+}
 pub trait Guest {
     /// Entry point. input/output are JSON strings (engine treats them as opaque).
     fn run(input: _rt::String) -> Result<_rt::String, _rt::String>;
+    /// Continue from a checkpointed state blob. Guests that never call checkpoint
+    /// implement this as: return Err("no checkpoints").
+    fn resume(state: _rt::Vec<u8>) -> Result<_rt::String, _rt::String>;
 }
 #[doc(hidden)]
 macro_rules! __export_world_workflow_cabi {
@@ -61,7 +112,12 @@ macro_rules! __export_world_workflow_cabi {
         export_run(arg0 : * mut u8, arg1 : usize,) -> * mut u8 { unsafe {
         $($path_to_types)*:: _export_run_cabi::<$ty > (arg0, arg1) } } #[unsafe
         (export_name = "cabi_post_run")] unsafe extern "C" fn _post_return_run(arg0 : *
-        mut u8,) { unsafe { $($path_to_types)*:: __post_return_run::<$ty > (arg0) } } };
+        mut u8,) { unsafe { $($path_to_types)*:: __post_return_run::<$ty > (arg0) } }
+        #[unsafe (export_name = "resume")] unsafe extern "C" fn export_resume(arg0 : *
+        mut u8, arg1 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+        _export_resume_cabi::<$ty > (arg0, arg1) } } #[unsafe (export_name =
+        "cabi_post_resume")] unsafe extern "C" fn _post_return_resume(arg0 : * mut u8,) {
+        unsafe { $($path_to_types)*:: __post_return_resume::<$ty > (arg0) } } };
     };
 }
 #[doc(hidden)]
@@ -103,7 +159,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.2.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
                     unsafe extern "C" {
                         #[link_name = "http-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -161,7 +217,7 @@ pub mod keel {
             pub fn sleep_ms(ms: u64) -> () {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.2.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
                     unsafe extern "C" {
                         #[link_name = "sleep-ms"]
                         fn wit_import0(_: i64);
@@ -178,7 +234,7 @@ pub mod keel {
             pub fn now_ms() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.2.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
                     unsafe extern "C" {
                         #[link_name = "now-ms"]
                         fn wit_import0() -> i64;
@@ -196,7 +252,7 @@ pub mod keel {
             pub fn random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.2.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
                     unsafe extern "C" {
                         #[link_name = "random-u64"]
                         fn wit_import0() -> i64;
@@ -230,7 +286,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.2.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
                     unsafe extern "C" {
                         #[link_name = "await-event"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -251,6 +307,30 @@ pub mod keel {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
+            /// Journaled. The guest hands the engine a self-serialized state blob at a safe
+            /// point. Contract: state must fully determine all FUTURE host calls the guest
+            /// will make (given replayed results). The engine may later restart the guest
+            /// via resume(state) instead of run(input), and prunes journal rows older than
+            /// the checkpoint.
+            pub fn checkpoint(state: &[u8]) -> () {
+                unsafe {
+                    let vec0 = state;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    unsafe extern "C" {
+                        #[link_name = "checkpoint"]
+                        fn wit_import1(_: *mut u8, _: usize);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8, _: usize) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0.cast_mut(), len0) };
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
             /// NOT journaled as an effect: forwarded to engine logs, tagged with the
             /// workflow id. Free to call; returns nothing; identical on replay by
             /// construction (log is simply not sequence-numbered at all — see SPEC.md §4.1).
@@ -260,7 +340,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.2.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -362,19 +442,21 @@ macro_rules! __export_workflow_impl {
 pub(crate) use __export_workflow_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.2.0:workflow:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.3.0:workflow:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 355] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe4\x01\x01A\x02\x01\
-A\x05\x01B\x0c\x01j\x01s\x01s\x01@\x01\x03urls\0\0\x04\0\x08http-get\x01\x01\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 411] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9c\x02\x01A\x02\x01\
+A\x08\x01B\x0f\x01j\x01s\x01s\x01@\x01\x03urls\0\0\x04\0\x08http-get\x01\x01\x01\
 @\x01\x02msw\x01\0\x04\0\x08sleep-ms\x01\x02\x01@\0\0w\x04\0\x06now-ms\x01\x03\x04\
-\0\x0arandom-u64\x01\x03\x01@\x01\x04names\0s\x04\0\x0bawait-event\x01\x04\x01@\x01\
-\x03msgs\x01\0\x04\0\x03log\x01\x05\x03\0\x1ckeel:workflow/host-api@0.2.0\x05\0\x01\
-j\x01s\x01s\x01@\x01\x05inputs\0\x01\x04\0\x03run\x01\x02\x04\0\x1ckeel:workflow\
-/workflow@0.2.0\x04\0\x0b\x0e\x01\0\x08workflow\x03\0\0\0G\x09producers\x01\x0cp\
-rocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+\0\x0arandom-u64\x01\x03\x01@\x01\x04names\0s\x04\0\x0bawait-event\x01\x04\x01p}\
+\x01@\x01\x05state\x05\x01\0\x04\0\x0acheckpoint\x01\x06\x01@\x01\x03msgs\x01\0\x04\
+\0\x03log\x01\x07\x03\0\x1ckeel:workflow/host-api@0.3.0\x05\0\x01j\x01s\x01s\x01\
+@\x01\x05inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\x03\0\x01\x04\
+\0\x06resume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.3.0\x04\0\x0b\x0e\x01\0\x08\
+workflow\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.2\
+27.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

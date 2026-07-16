@@ -246,6 +246,15 @@ impl keel::workflow::host_api::Host for Ctx {
         }
     }
 
+    fn checkpoint(&mut self, state: Vec<u8>) -> wasmtime::Result<()> {
+        // Task 3.1 stub so the 0.3.0 bindings compile; the real snapshot + prune
+        // implementation lands in Task 3.3. Calling it before then traps the guest.
+        let _ = state;
+        Err(trap(anyhow::anyhow!(
+            "checkpoint is not implemented until Task 3.3"
+        )))
+    }
+
     fn log(&mut self, msg: String) -> wasmtime::Result<()> {
         // NOT journaled: no seq claimed, no row written (SPEC.md §4.1).
         tracing::info!(workflow = %self.j.workflow_id, "guest: {msg}");

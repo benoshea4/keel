@@ -29,6 +29,13 @@ impl bindings::Guest for Component {
             b.len()
         ))
     }
+
+    // WIT 0.3.0 (Task 3.1): resume is a REQUIRED export. This guest never calls
+    // checkpoint, so the engine can never legitimately invoke this — the spec's
+    // prescribed stub.
+    fn resume(_state: Vec<u8>) -> Result<String, String> {
+        Err("no checkpoints".to_string())
+    }
 }
 
 bindings::export!(Component with_types_in bindings);
