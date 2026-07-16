@@ -1,0 +1,31 @@
+# Phase 3 acceptance guest (SPEC.md Task 3.7) — ONE crate, TWO artifacts:
+#
+#   cargo component build --release --target wasm32-unknown-unknown                 # v1
+#   cargo component build --release --target wasm32-unknown-unknown --features v2   # v2
+#
+# Same output filename both times (target/.../counter.wasm) — copy the v1 artifact
+# aside before building v2 (accept_phase3.sh does this).
+
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+v2 = []
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:counter"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"
