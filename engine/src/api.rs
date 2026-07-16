@@ -8,7 +8,8 @@
 // RULE: never hold a Connection across an .await (it would also make the handler
 // future !Send). Collect async inputs first (extractors), then do sync DB work.
 //
-// PHASE 3 (Task 3.6) adds POST /api/workflows/{id}/upgrade.
+// The API surface is complete for all 3 phases: modules, workflows, events,
+// journal, upgrade.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -180,6 +181,153 @@ pub async fn post_event(
     db::insert_event(&conn, &id, &name, &payload_json).map_err(internal)?;
     shared.notifier.notify(&id); // wake the park loop now instead of ≤1s later
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Step-1 claim on an in-flight upgrade. Drop removes the id on EVERY exit path
+/// of the handler — success, validation 409, timeout, panic (SPEC.md Task 3.6).
+struct UpgradeClaim {
+    shared: Arc<EngineShared>,
+    id: String,
+}
+
+impl UpgradeClaim {
+    fn acquire(shared: &Arc<EngineShared>, id: &str) -> Option<UpgradeClaim> {
+        if shared.upgrades.lock().unwrap().insert(id.to_string()) {
+            Some(UpgradeClaim {
+                shared: shared.clone(),
+                id: id.to_string(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for UpgradeClaim {
+    fn drop(&mut self) {
+        self.shared.upgrades.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// POST /api/workflows/{id}/upgrade — Task 3.6. Two body shapes like the other
+/// write endpoints: JSON {"module_hash": "<new>"} or the detail page's form.
+/// Moves a PARKED, checkpointed workflow onto new code: aborts its thread at the
+/// park point, discards the journal tail beyond the checkpoint (un-delivering
+/// events that tail had consumed), points workflow + snapshot at the new module,
+/// and respawns — the guest resumes from its checkpoint state under new code.
+pub async fn upgrade_workflow(
+    State(shared): State<Arc<EngineShared>>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Result<Json<Value>, ApiErr> {
+    let new_hash = if content_type(&req).starts_with("application/x-www-form-urlencoded") {
+        let Form(f) = Form::<HashMap<String, String>>::from_request(req, &())
+            .await
+            .map_err(bad)?;
+        f.get("module_hash")
+            .cloned()
+            .ok_or((StatusCode::BAD_REQUEST, "missing module_hash".to_string()))?
+    } else {
+        let Json(body) = Json::<Value>::from_request(req, &()).await.map_err(bad)?;
+        body.get("module_hash")
+            .and_then(Value::as_str)
+            .ok_or((StatusCode::BAD_REQUEST, "missing module_hash".to_string()))?
+            .to_string()
+    };
+
+    // Step 1 — claim.
+    let _claim = UpgradeClaim::acquire(&shared, &id).ok_or((
+        StatusCode::CONFLICT,
+        "upgrade already in progress".to_string(),
+    ))?;
+
+    // Step 2 — validate (scoped connection: never held across an .await).
+    {
+        let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+        let wf = db::get_workflow(&conn, &id)
+            .map_err(internal)?
+            .ok_or((StatusCode::NOT_FOUND, "unknown workflow id".to_string()))?;
+        if !db::module_exists(&conn, &new_hash).map_err(internal)? {
+            return Err((StatusCode::NOT_FOUND, "unknown module hash".to_string()));
+        }
+        if wf.status != "sleeping" && wf.status != "waiting_event" {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "workflow is {} — only parked (sleeping/waiting_event) workflows can be upgraded",
+                    wf.status
+                ),
+            ));
+        }
+        if db::get_snapshot(&conn, &id).map_err(internal)?.is_none() {
+            return Err((
+                StatusCode::CONFLICT,
+                "no checkpoint yet — the guest must call checkpoint before it can be upgraded"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // Step 3 — yank the parked worker. set_abort() also notifies, so the park
+    // loop re-checks immediately and bails with AbortForUpgrade (the runner exits
+    // that thread silently, status untouched).
+    shared.notifier.set_abort(&id);
+    if let Some(h) = shared.take_thread(&id) {
+        // Bounded join WITHOUT blocking the async handler: poll is_finished and
+        // only join once true (then it's instant). Deviation from the spec's
+        // spawn_blocking sketch (status.md dev. 14): on timeout the handle goes
+        // BACK into the registry, so a retry joins THIS still-running thread
+        // instead of concluding "already exited" and racing a live worker.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if h.is_finished() {
+                let _ = h.join(); // instant; worker errors were already recorded
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                // Leaving the abort flag set here would zombie the workflow at
+                // its next park — clearing it is MANDATORY (spec step 3).
+                shared.notifier.clear_abort(&id);
+                shared.put_thread(&id, h);
+                return Err((
+                    StatusCode::CONFLICT,
+                    "workflow is actively executing (not parked); retry when it parks"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    // The joined worker's runner cleared the flag on its way out; the
+    // thread-already-exited path never observed it. Clear unconditionally so a
+    // set-but-unobserved flag can't instantly abort the respawned workflow.
+    shared.notifier.clear_abort(&id);
+
+    // Steps 4+5 — re-read state post-join: the worker may have advanced (even
+    // completed) between validation and the abort landing. C comes from the
+    // CURRENT snapshot; a no-longer-parked workflow must not be resurrected.
+    let c_seq = {
+        let mut conn = db::open_conn(&shared.db_path).map_err(internal)?;
+        let wf = db::get_workflow(&conn, &id)
+            .map_err(internal)?
+            .ok_or((StatusCode::NOT_FOUND, "unknown workflow id".to_string()))?;
+        if wf.status != "sleeping" && wf.status != "waiting_event" {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("workflow moved to {} during the upgrade — retry", wf.status),
+            ));
+        }
+        let snap = db::get_snapshot(&conn, &id).map_err(internal)?.ok_or((
+            StatusCode::CONFLICT,
+            "snapshot disappeared during the upgrade — retry".to_string(),
+        ))?;
+        db::upgrade_module_txn(&mut conn, &id, snap.journal_seq, &new_hash).map_err(internal)?;
+        snap.journal_seq
+    };
+    runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 3 of 3 (§0)
+    Ok(Json(
+        json!({ "id": id, "module_hash": new_hash, "resumed_from_seq": c_seq }),
+    ))
 }
 
 /// GET /api/workflows/{id}

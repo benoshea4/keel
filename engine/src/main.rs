@@ -109,6 +109,7 @@ async fn serve(db_path: String, listen: String, max_running: u32) -> Result<()> 
         .route("/api/workflows/{id}", get(api::get_workflow))
         .route("/api/workflows/{id}/journal", get(api::get_journal))
         .route("/api/workflows/{id}/events", post(api::post_event))
+        .route("/api/workflows/{id}/upgrade", post(api::upgrade_workflow))
         // Task 2.8 — server-rendered UI + polling partials + embedded assets.
         .route("/", get(ui::dashboard))
         .route("/partials/workflows", get(ui::workflows_partial))

@@ -51,6 +51,9 @@ pub struct EngineShared {
     /// spawn()'s insert leaves a finished handle behind — joining it later
     /// returns instantly, and a respawn of the same id overwrites it.
     threads: Mutex<HashMap<String, std::thread::JoinHandle<()>>>,
+    /// Task 3.6 — workflow ids with an upgrade in flight (step 1's claim set).
+    /// api.rs's UpgradeClaim guard inserts/removes.
+    pub upgrades: Mutex<std::collections::HashSet<String>>,
 }
 
 impl EngineShared {
@@ -69,7 +72,21 @@ impl EngineShared {
             running: Mutex::new(0),
             running_cv: Condvar::new(),
             threads: Mutex::new(HashMap::new()),
+            upgrades: Mutex::new(std::collections::HashSet::new()),
         })
+    }
+
+    /// Task 3.6 — the upgrade handler takes a parked worker's JoinHandle to join
+    /// it after set_abort. None: the thread already exited.
+    pub fn take_thread(&self, id: &str) -> Option<std::thread::JoinHandle<()>> {
+        self.threads.lock().unwrap().remove(id)
+    }
+
+    /// Task 3.6 — a join that timed out puts the handle BACK so a later upgrade
+    /// attempt joins THIS still-running thread instead of assuming it exited
+    /// (which would let step 5 race a live worker on the same journal).
+    pub fn put_thread(&self, id: &str, h: std::thread::JoinHandle<()>) {
+        self.threads.lock().unwrap().insert(id.to_string(), h);
     }
 
     fn component(&self, hash: &str, wasm: &[u8]) -> Result<Component> {

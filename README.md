@@ -61,6 +61,28 @@ curl -s -X POST localhost:8080/api/workflows/<id>/events \
 event, kill -9 again mid-sleep, and the workflow still completes exactly once with
 the delivered payload.
 
+## Checkpoints and live code upgrade (phase 3)
+
+A guest can call `checkpoint(state)` at a safe point: the engine snapshots the
+state blob and prunes all older journal rows, so long-running workflows restart
+from the checkpoint (`resume(state)`) instead of replaying from the beginning. A
+workflow that is parked (sleeping / waiting for an event) *and* has a checkpoint
+can be moved onto new code without losing its state:
+
+```bash
+curl -s -X POST localhost:8080/api/workflows/<id>/upgrade \
+  -H 'content-type: application/json' \
+  -d '{"module_hash":"<new module hash>"}'
+```
+
+The engine aborts the parked worker at its park point, discards the journal tail
+beyond the checkpoint (re-queueing any events that tail had consumed), points the
+workflow at the new module, and resumes it from the checkpoint state. One
+documented wrinkle: an in-flight sleep restarts from `resume` with a fresh full
+duration after an upgrade, because its timer and journal tail were discarded.
+`scripts/accept_phase3.sh` proves pruning, resume-based recovery, and a v1→v2
+upgrade mid-workflow.
+
 ## Known, accepted limitation: runaway guests
 
 Runaway-guest protection is a non-goal: a guest that spins in pure compute without

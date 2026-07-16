@@ -435,6 +435,43 @@ pub fn get_snapshot(c: &Connection, workflow_id: &str) -> Result<Option<Snapshot
         .optional()?)
 }
 
+/// Task 3.6 step 4, in ONE transaction: discard everything the workflow executed
+/// beyond its checkpoint C, then point workflow + snapshot at the new module.
+/// Un-delivering events whose delivery row fell in the discarded tail
+/// (delivered_seq > C) is what lets the re-executed await-event find them again —
+/// without it the workflow would wait forever on an already-consumed event.
+/// Undelivered events are untouched. The workflows UPDATE bypasses set_status on
+/// purpose (it changes module_hash, not status, and MUST sit in this txn) but
+/// still maintains updated_at.
+pub fn upgrade_module_txn(
+    c: &mut Connection,
+    workflow_id: &str,
+    c_seq: i64,
+    new_hash: &str,
+) -> Result<()> {
+    let tx = c.transaction()?;
+    tx.execute(
+        "DELETE FROM journal WHERE workflow_id = ?1 AND seq > ?2",
+        rusqlite::params![workflow_id, c_seq],
+    )?;
+    tx.execute("DELETE FROM timers WHERE workflow_id = ?1", [workflow_id])?;
+    tx.execute(
+        "UPDATE events SET delivered = 0, delivered_seq = NULL
+         WHERE workflow_id = ?1 AND delivered_seq > ?2",
+        rusqlite::params![workflow_id, c_seq],
+    )?;
+    tx.execute(
+        "UPDATE workflows SET module_hash = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![workflow_id, new_hash, now_ms()],
+    )?;
+    tx.execute(
+        "UPDATE snapshots SET module_hash = ?2 WHERE workflow_id = ?1",
+        rusqlite::params![workflow_id, new_hash],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Task 1.4 — this query IS the recovery implementation: every non-terminal workflow
 /// simply gets started again from seq 0; the journal turns re-execution into replay.
 pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {

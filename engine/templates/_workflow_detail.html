@@ -1,5 +1,18 @@
 {# Swapped into the detail <div> on the workflow page (innerHTML, every 2s). #}
 <p><span class="badge {{ status }}">{{ status }}</span></p>
+{% if upgradable %}
+{# Task 3.6 step 6 — only rendered when status is sleeping/waiting_event AND a
+   checkpoint snapshot exists (the endpoint enforces the same). #}
+<form hx-post="/api/workflows/{{ id }}/upgrade" hx-swap="none">
+  <label for="upgrade_hash">Upgrade to module</label>
+  <select id="upgrade_hash" name="module_hash">
+    {% for m in modules %}
+    <option value="{{ m.hash }}">{{ m.name }} ({{ m.short_hash }})</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Upgrade module</button>
+</form>
+{% endif %}
 <h2>Input</h2>
 <pre>{{ input }}</pre>
 <h2>Output</h2>

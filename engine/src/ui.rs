@@ -133,15 +133,21 @@ struct WorkflowPage {
     input: String,
     output: String,
     journal: Vec<JRow>,
+    upgradable: bool,
+    modules: Vec<ModRow>,
 }
 
 #[derive(Template)]
 #[template(path = "_workflow_detail.html")]
 struct WorkflowDetail {
+    id: String,
     status: String,
     input: String,
     output: String,
     journal: Vec<JRow>,
+    // Task 3.6 step 6: the upgrade control renders only when parked + snapshotted.
+    upgradable: bool,
+    modules: Vec<ModRow>,
 }
 
 #[derive(Template)]
@@ -187,10 +193,28 @@ pub async fn workflows_partial(
     })
 }
 
-fn detail_parts(
-    shared: &EngineShared,
-    id: &str,
-) -> Result<(db::WorkflowRow, String, Vec<JRow>), UiErr> {
+fn mod_rows(conn: &rusqlite::Connection) -> Result<Vec<ModRow>, UiErr> {
+    Ok(db::list_modules(conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|m| ModRow {
+            short_hash: short(&m.hash),
+            name: module_label(&m.name, &m.hash),
+            hash: m.hash,
+            uploaded: ago(m.created_at),
+        })
+        .collect())
+}
+
+struct DetailParts {
+    wf: db::WorkflowRow,
+    module: String,
+    journal: Vec<JRow>,
+    upgradable: bool,
+    modules: Vec<ModRow>,
+}
+
+fn detail_parts(shared: &EngineShared, id: &str) -> Result<DetailParts, UiErr> {
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     let wf = db::get_workflow(&conn, id).map_err(internal)?.ok_or((
         StatusCode::NOT_FOUND,
@@ -211,7 +235,18 @@ fn detail_parts(
             time: ago(r.created_at),
         })
         .collect();
-    Ok((wf, module, journal))
+    // Task 3.6 step 6: upgrade is offered exactly when the endpoint would accept
+    // it — parked AND checkpointed.
+    let upgradable = (wf.status == "sleeping" || wf.status == "waiting_event")
+        && db::get_snapshot(&conn, id).map_err(internal)?.is_some();
+    let modules = if upgradable { mod_rows(&conn)? } else { Vec::new() };
+    Ok(DetailParts {
+        wf,
+        module,
+        journal,
+        upgradable,
+        modules,
+    })
 }
 
 fn output_display(status: &str, output: &Option<String>) -> String {
@@ -227,15 +262,17 @@ pub async fn workflow_page(
     State(shared): State<Arc<EngineShared>>,
     Path(id): Path<String>,
 ) -> Result<Html<String>, UiErr> {
-    let (wf, module, journal) = detail_parts(&shared, &id)?;
+    let p = detail_parts(&shared, &id)?;
     render(WorkflowPage {
-        short_id: short(&wf.id),
-        id: wf.id,
-        module,
-        output: output_display(&wf.status, &wf.output),
-        status: wf.status,
-        input: wf.input,
-        journal,
+        short_id: short(&p.wf.id),
+        id: p.wf.id,
+        module: p.module,
+        output: output_display(&p.wf.status, &p.wf.output),
+        status: p.wf.status,
+        input: p.wf.input,
+        journal: p.journal,
+        upgradable: p.upgradable,
+        modules: p.modules,
     })
 }
 
@@ -244,27 +281,21 @@ pub async fn workflow_partial(
     State(shared): State<Arc<EngineShared>>,
     Path(id): Path<String>,
 ) -> Result<Html<String>, UiErr> {
-    let (wf, _module, journal) = detail_parts(&shared, &id)?;
+    let p = detail_parts(&shared, &id)?;
     render(WorkflowDetail {
-        output: output_display(&wf.status, &wf.output),
-        status: wf.status,
-        input: wf.input,
-        journal,
+        id: p.wf.id.clone(),
+        output: output_display(&p.wf.status, &p.wf.output),
+        status: p.wf.status,
+        input: p.wf.input,
+        journal: p.journal,
+        upgradable: p.upgradable,
+        modules: p.modules,
     })
 }
 
 /// GET /modules
 pub async fn modules_page(State(shared): State<Arc<EngineShared>>) -> Result<Html<String>, UiErr> {
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
-    let modules = db::list_modules(&conn)
-        .map_err(internal)?
-        .into_iter()
-        .map(|m| ModRow {
-            short_hash: short(&m.hash),
-            name: module_label(&m.name, &m.hash),
-            hash: m.hash,
-            uploaded: ago(m.created_at),
-        })
-        .collect();
+    let modules = mod_rows(&conn)?;
     render(ModulesPage { modules })
 }

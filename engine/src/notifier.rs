@@ -67,7 +67,6 @@ impl Notifier {
 
     /// PHASE 3 (Task 3.6): flag a parked workflow so its park loop bails out with
     /// AbortForUpgrade at the next check; the notify makes "next check" be now.
-    #[allow(dead_code)] // wired up by PHASE 3 Task 3.6 — remove this allow then
     pub fn set_abort(&self, id: &str) {
         self.aborts.lock().unwrap().insert(id.to_string());
         self.notify(id);
