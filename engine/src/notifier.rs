@@ -58,7 +58,6 @@ impl Notifier {
             .unwrap();
     }
 
-    #[allow(dead_code)] // first caller lands in Task 2.5 (POST events) — remove then
     pub fn notify(&self, id: &str) {
         let entry = self.entry(id);
         let (gen, cv) = &*entry;

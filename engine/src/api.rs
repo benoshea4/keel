@@ -8,7 +8,6 @@
 // RULE: never hold a Connection across an .await (it would also make the handler
 // future !Send). Collect async inputs first (extractors), then do sync DB work.
 //
-// PHASE 2 (Task 2.5) adds POST /api/workflows/{id}/events here (+ notifier.notify).
 // PHASE 3 (Task 3.6) adds POST /api/workflows/{id}/upgrade.
 
 use std::collections::HashMap;
@@ -66,6 +65,32 @@ pub async fn create_workflow(
     db::create_workflow(&conn, &id, module_hash, &input.to_string()).map_err(internal)?;
     runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 1 of 3 (§0)
     Ok(Json(json!({ "id": id })))
+}
+
+/// POST /api/workflows/{id}/events — {"name": "approve", "payload": <any json>} → 202.
+/// The payload is stored as its JSON text; await-event hands that string to the
+/// guest verbatim. Queueing is fire-and-forget: the workflow needn't be parked on
+/// a matching await-event yet (or ever) — undelivered events simply wait.
+pub async fn post_event(
+    State(shared): State<Arc<EngineShared>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode, ApiErr> {
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or((StatusCode::BAD_REQUEST, "missing name".to_string()))?;
+    let payload = body
+        .get("payload")
+        .ok_or((StatusCode::BAD_REQUEST, "missing payload".to_string()))?;
+
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::get_workflow(&conn, &id).map_err(internal)?.is_none() {
+        return Err((StatusCode::NOT_FOUND, "unknown workflow id".to_string()));
+    }
+    db::insert_event(&conn, &id, name, &payload.to_string()).map_err(internal)?;
+    shared.notifier.notify(&id); // wake the park loop now instead of ≤1s later
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// GET /api/workflows/{id}

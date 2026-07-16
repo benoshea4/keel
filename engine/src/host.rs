@@ -193,10 +193,57 @@ impl keel::workflow::host_api::Host for Ctx {
     }
 
     fn await_event(&mut self, name: String) -> wasmtime::Result<String> {
-        // Task 2.1 stub so the 0.2.0 bindings compile; the real park-loop
-        // implementation lands in Task 2.5. Calling it before then traps the guest.
-        let _ = name;
-        Err(trap(anyhow::anyhow!("await-event is not implemented until Task 2.5")))
+        // Task 2.5 — external events. Same shape as durable sleep above: hand-rolled
+        // replay check + park loop. The delivery step is a SINGLE transaction
+        // (db::deliver_event_and_journal) — consuming the event and journaling it
+        // must be atomic, or a crash between them loses (or double-delivers) it.
+        #[derive(Serialize)]
+        struct Req {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            payload: String,
+        }
+        let seq = self.j.next_seq;
+        self.j.next_seq += 1;
+        let id = self.j.workflow_id.clone();
+        let req_json =
+            serde_json::to_string(&Req { name: name.clone() }).map_err(|e| trap(e.into()))?;
+
+        // Replay path — the same verification journaled() performs.
+        if let Some((rkind, rreq, rresp)) =
+            db::get_journal_row(&self.j.db, &id, seq).map_err(trap)?
+        {
+            if rkind != "await-event" || rreq != req_json {
+                return Err(trap(anyhow::anyhow!(
+                    "nondeterministic replay at seq {seq}: recorded ({rkind}, {rreq}) \
+                     but live code produced (await-event, {req_json}). The workflow \
+                     code has diverged from its journal."
+                )));
+            }
+            let r: Resp = serde_json::from_str(&rresp)
+                .map_err(|e| trap(anyhow::Error::new(e).context("corrupt journal response")))?;
+            return Ok(r.payload);
+        }
+
+        // Live path: park until a matching event arrives.
+        db::set_status(&self.j.db, &id, "waiting_event", None).map_err(trap)?;
+        loop {
+            // Abort check BEFORE the delivering txn: an aborted worker must never
+            // consume an event (SPEC.md Task 2.5).
+            if self.notifier.is_aborted(&id) {
+                return Err(trap(anyhow::Error::new(AbortForUpgrade)));
+            }
+            if let Some(payload) =
+                db::deliver_event_and_journal(&mut self.j.db, &id, seq, &name, &req_json)
+                    .map_err(trap)?
+            {
+                db::set_status(&self.j.db, &id, "running", None).map_err(trap)?;
+                return Ok(payload);
+            }
+            self.notifier.wait(&id, std::time::Duration::from_millis(1000));
+        }
     }
 
     fn log(&mut self, msg: String) -> wasmtime::Result<()> {

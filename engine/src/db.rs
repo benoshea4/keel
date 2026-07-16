@@ -257,6 +257,61 @@ pub fn delete_timer(c: &Connection, workflow_id: &str) -> Result<()> {
     Ok(())
 }
 
+// --- Events (Task 2.5 external events) -----------------------------------------
+
+/// API side: queue an event for the workflow. It stays undelivered until an
+/// await-event call with a matching name consumes it (FIFO by rowid).
+pub fn insert_event(c: &Connection, workflow_id: &str, name: &str, payload: &str) -> Result<()> {
+    c.execute(
+        "INSERT INTO events (workflow_id, name, payload, delivered, delivered_seq, created_at)
+         VALUES (?1, ?2, ?3, 0, NULL, ?4)",
+        rusqlite::params![workflow_id, name, payload, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// Host side of await-event: in ONE transaction, consume the oldest undelivered
+/// matching event AND journal its delivery. The atomicity is MANDATORY (SPEC.md
+/// Task 2.5): a crash between "delivered=1" and the journal INSERT silently loses
+/// the event; the reverse order would deliver it twice. `req_json` is passed in
+/// (not rebuilt here) so the journal row's request field is byte-identical to what
+/// host.rs's replay check verifies against. Returns the payload, or None when no
+/// matching event is queued (caller parks and retries).
+pub fn deliver_event_and_journal(
+    c: &mut Connection,
+    workflow_id: &str,
+    seq: i64,
+    name: &str,
+    req_json: &str,
+) -> Result<Option<String>> {
+    let tx = c.transaction()?;
+    let found: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT id, payload FROM events
+             WHERE workflow_id = ?1 AND name = ?2 AND delivered = 0
+             ORDER BY id LIMIT 1",
+            rusqlite::params![workflow_id, name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((event_id, payload)) = found else {
+        return Ok(None); // tx drops → rollback of nothing
+    };
+    tx.execute(
+        "UPDATE events SET delivered = 1, delivered_seq = ?2 WHERE id = ?1",
+        rusqlite::params![event_id, seq],
+    )?;
+    // §4.2 response shape: {"payload": "<the event's payload JSON text>"}.
+    let resp_json = serde_json::to_string(&serde_json::json!({ "payload": payload }))?;
+    tx.execute(
+        "INSERT INTO journal (workflow_id, seq, kind, request, response, created_at)
+         VALUES (?1, ?2, 'await-event', ?3, ?4, ?5)",
+        rusqlite::params![workflow_id, seq, req_json, resp_json, now_ms()],
+    )?;
+    tx.commit()?;
+    Ok(Some(payload))
+}
+
 /// Task 1.4 — this query IS the recovery implementation: every non-terminal workflow
 /// simply gets started again from seq 0; the journal turns re-execution into replay.
 pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {

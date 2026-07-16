@@ -85,6 +85,7 @@ async fn serve(db_path: String, listen: String) -> Result<()> {
         // 0.7-era ":id", which PANICS at router build time in 0.8 (status.md dev. 1).
         .route("/api/workflows/{id}", get(api::get_workflow))
         .route("/api/workflows/{id}/journal", get(api::get_journal))
+        .route("/api/workflows/{id}/events", post(api::post_event))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
