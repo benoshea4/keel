@@ -31,16 +31,65 @@ definition of done) and runs in CI.
 
 ## Next
 
-- **v2.1 — extension surface:** capability providers via the WIT world (custom
-  journaled effects, event-source connectors); library/binary crate split so
-  Keel embeds in-process.
-- **v2.2 — scheduling & config depth:** cron expressions on schedules (interval
-  is the primitive today), per-schedule enable/disable API, `secret(name)` host
-  call behind a written design (journals must not become a secrets dump).
-- **v2.3 — journal semantics:** KV versioning across upgrade tail-discards
-  (today a discarded tail's kv writes survive — documented caveat in
-  docs/guests.md), idempotency keys for the at-least-once exec window.
-- **v2.4 — surface polish:** schedules in the UI, OTel traces, linux-arm64
-  release binaries, systemd/k8s deployment recipes, load/fuzz test suites.
-- **Cloud (unversioned):** the hosted control plane on fleet cells — built if
-  and when the open engine earns it (VISION.md).
+Sequencing rationale: **secrets before platform work** — today a workflow
+calling an authenticated API must carry its token in the workflow input, which
+the journal stores in plaintext. That blocks real adoption more than any
+missing abstraction, so it goes first. One WIT bump per stage, never two.
+
+### v2.1 — real-workflow depth
+
+- **`secret(name)` host call** (WIT 0.5.0). Design, resolving the
+  journals-must-not-store-secrets tension: values come from `--secrets-file`
+  (KEY=VALUE, mode 0600), the call returns the live value, and the journal
+  records only `{name}` → `{sha256(value)}`. Replay re-reads the live file and
+  verifies the hash — a rotated secret fails replay *loudly* ("secret X
+  changed mid-workflow; restore it or cancel") instead of silently diverging.
+  Secret bytes never touch the database.
+  *Gate:* `smoke_secrets.sh` — secret in an `http-request` header against the
+  stub; kill -9 → replay works; rotate the file → replay fails with the
+  message.
+- **Cron expressions on schedules** — `cron` field (seconds-resolution parser)
+  as an alternative to `interval_ms`, same single-txn fire; plus
+  `PATCH /api/schedules/{id}` for enable/disable.
+  *Gate:* extend `smoke_effects.sh`.
+- **Per-call `timeout-ms` on http-request** — rides the same 0.5.0 bump.
+
+### v2.2 — platform
+
+- **Crate split**: `keel-core` library (open engine, create/cancel/upgrade
+  workflows, in-process API) + the `keel` binary consuming it — the
+  "embeddable" in the positioning becomes literal.
+  *Gate:* `examples/embedded.rs` runs a workflow in-process under `cargo test`.
+- **Capability providers** — design doc (`PROVIDERS.md`) first, then: a
+  provider is a wasm component implementing a `keel:provider` world
+  (`handle(kind, request-json) → result<json>`); the engine journals
+  `custom:<kind>` around it; registered via `--provider name=path.wasm`.
+  Providers get no ambient capabilities — effects flow back through the
+  engine. This is how Keel grows effects the way Envoy grows filters.
+  *Gate:* a sample provider + `smoke_providers.sh`.
+
+### v2.3 — journal semantics
+
+- **KV versioning** — append-only `(workflow_id, key, seq, value)`; reads
+  resolve latest-at-or-below the current seq; upgrade tail-discard drops
+  rows above C. Closes the documented kv-vs-upgrade caveat (docs/guests.md).
+  Compaction rides the retention GC.
+  *Gate:* an upgrade smoke asserting kv rolls back with the tail.
+- **Idempotency keys** — the engine injects
+  `keel-idempotency-key: <workflow_id>:<seq>` on http-request (opt-out), so
+  remotes can dedupe the at-least-once window; documented server-side pattern.
+  *Gate:* stub that dedupes by key.
+
+### v2.4 — surface & scale polish
+
+Schedules and kv in the UI · linux-arm64 release binaries (public repo = free
+arm runners) · OTel traces behind a cargo feature · systemd unit + compose/k8s
+recipes in docs · `scripts/load_test.sh` (hundreds of concurrent workflows:
+cap respected, all complete, journal integrity holds).
+
+### Cloud (unversioned, gated on adoption)
+
+The hosted control plane on fleet cells — provisioning API, metering from
+`/metrics`, billing last. Built if and when the open engine earns real users
+(VISION.md). Nothing in v2.1–v2.4 blocks on it; everything in it builds on
+v2.1–v2.4.
