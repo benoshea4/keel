@@ -28,6 +28,9 @@ fleet, you run many independent keels (see "edge" below).
 
 ## Roadmap
 
+The living, itemized version with acceptance criteria is [ROADMAP.md](ROADMAP.md);
+the sequence below is the shape of it.
+
 Done (v1.0–v1.1): the durable core — journal-before-return, replay recovery,
 durable timers, external events, checkpoints + pruning, live v1→v2 upgrade,
 cancel (park-loop + epoch interruption), htmx UI, operator token auth, guest

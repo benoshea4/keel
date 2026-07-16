@@ -35,6 +35,9 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_phase3.sh                          # must print PHASE 3 PASS
 ./scripts/smoke_cancel.sh                           # must print CANCEL SMOKE PASS
 ./scripts/smoke_auth.sh                             # must print AUTH+LIMITS SMOKE PASS
+./scripts/smoke_effects.sh                          # must print EFFECTS SMOKE PASS (v1.2/v1.3)
+./scripts/smoke_dr.sh                               # must print DR SMOKE PASS (backup/restore)
+./scripts/smoke_fleet.sh                            # must print FLEET SMOKE PASS (cell tenancy)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -218,6 +221,36 @@ F5. *(v1.1, same day)* **Auth + guest memory limits** — the go-public
    256) builds a wasmtime StoreLimits per store; a guest that outgrows it
    fails. `scripts/smoke_auth.sh` gates all of it (401s, bearer lifecycle,
    cookie digest, open-mode regression, 1 MiB cap → failed).
+
+G. *(v1.2/v1.3/v2 slice, 2026-07-16 — "build out the full roadmap")* One pass,
+   each piece gated by a script:
+   - **WIT 0.4.0**: `http-request` (method/headers/body/opt-in retries; non-2xx
+     is DATA, journal kind `http-request`), `kv-set`/`kv-get` (kind `kv-set`/
+     `kv-get`; write+journal and read+journal are single transactions in db.rs,
+     same discipline as event delivery). All five guests rebuilt; new
+     `guests/effects` exercises everything; `scripts/stub_server.py` echoes and
+     COUNTS posts so `smoke_effects.sh` can prove replay ≠ re-execution.
+   - **Interval schedules**: `schedules` table + a 1s scheduler loop in main.rs
+     — runner::spawn call-site **4 of 4** (the §0 "exactly three" rule got its
+     one sanctioned amendment; comments updated). Missed windows collapse into
+     one firing (`advance_schedule` math).
+   - **v1.3 operability**: `GET /api/workflows` paged list, `/metrics`
+     (hand-rolled Prometheus text), retention GC (`--retain-terminal-hours`,
+     sweeps at startup then every 60s, cascades journal/events/snapshots/kv),
+     UI logout link.
+   - **v2 DR**: `db::backup_to` (rusqlite backup API — consistent while live),
+     `--backup-dir/--backup-interval-secs/--backup-keep` loop with pruning,
+     `keel backup` one-shot. `smoke_dr.sh` deletes the db and restores from a
+     snapshot mid-workflow. Continuous replication = Litestream, documented,
+     deliberately not reimplemented.
+   - **v2 cell tenancy**: `keel fleet --config fleet.toml` (engine/src/fleet.rs)
+     — per-tenant process/db/token children (token via env, never argv),
+     per-tenant `keel-<name>.log`, 1s supervision with crash-only restarts.
+     `smoke_fleet.sh` proves token isolation and respawn-with-state. RLS is
+     moot under cells (ROADMAP.md "Answered design questions").
+   - **KV caveat** (documented in docs/guests.md, roadmapped v2.3): upgrade
+     tail-discard does not roll back kv writes from the discarded tail.
+   - **Docs**: ROADMAP.md + docs/{operations,api,guests}.md.
 
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant
