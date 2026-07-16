@@ -256,19 +256,36 @@ impl keel::workflow::host_api::Host for Ctx {
 /// Live-path HTTP GET. 30s timeout is set on the Agent (runner.rs); the body read is
 /// capped at exactly 1 MiB (deterministic truncation, then lossy utf-8 so a cut
 /// mid-sequence still yields a string); non-2xx maps to Err("status NNN").
-/// PHASE 2 (Task 2.6): retries go HERE, on the live path only — never journal
-/// intermediate attempts; replay must see exactly one row per call.
+///
+/// Task 2.6 — retries, live path only: up to 3 attempts for transport errors
+/// (including a failed body read) and status ≥500; 4xx NEVER retries (the server
+/// answered; asking again won't change its mind). This function runs inside the
+/// journaled() closure, so however many attempts happen here, exactly ONE journal
+/// row records the final outcome — replay sees a single result.
 fn do_http_get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
-    match agent.get(url).call() {
-        Ok(resp) => {
-            let mut buf = Vec::new();
-            resp.into_reader()
-                .take(1024 * 1024)
-                .read_to_end(&mut buf)
-                .map_err(|e| format!("read error: {e}"))?;
-            Ok(String::from_utf8_lossy(&buf).into_owned())
+    // Backoff schedule per SPEC.md Task 2.6. With 3 attempts only the first two
+    // gaps are reachable; the 2s slot is the schedule's next step if attempts are
+    // ever raised.
+    const BACKOFF_MS: [u64; 3] = [500, 1000, 2000];
+    let attempts = 3;
+    let mut last_err = String::new();
+    for attempt in 0..attempts {
+        match agent.get(url).call() {
+            Ok(resp) => {
+                let mut buf = Vec::new();
+                match resp.into_reader().take(1024 * 1024).read_to_end(&mut buf) {
+                    Ok(_) => return Ok(String::from_utf8_lossy(&buf).into_owned()),
+                    // Connection died mid-body: a transport failure — retryable.
+                    Err(e) => last_err = format!("read error: {e}"),
+                }
+            }
+            Err(ureq::Error::Status(code, _)) if code < 500 => return Err(format!("status {code}")),
+            Err(ureq::Error::Status(code, _)) => last_err = format!("status {code}"),
+            Err(e) => last_err = format!("transport: {e}"),
         }
-        Err(ureq::Error::Status(code, _)) => Err(format!("status {code}")),
-        Err(e) => Err(format!("transport: {e}")),
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS[attempt]));
+        }
     }
+    Err(last_err)
 }
