@@ -74,6 +74,22 @@ struct JRow {
     time: String,
 }
 
+// v2.4 — schedules page + the workflow page's durable-KV section.
+
+struct SchedRow {
+    id: String,
+    short_id: String,
+    module: String,
+    when: String, // "every 5s" | "cron */2 * * * * *"
+    next: String, // "in 4s" | "due now"
+    enabled: bool,
+}
+
+struct KvRow {
+    key: String,
+    value: String,
+}
+
 fn short(s: &str) -> String {
     s.chars().take(8).collect()
 }
@@ -95,6 +111,18 @@ fn ago(ts_ms: i64) -> String {
         60..=3599 => format!("{}m ago", s / 60),
         3600..=86399 => format!("{}h ago", s / 3600),
         _ => format!("{}d ago", s / 86400),
+    }
+}
+
+/// "in 4s" / "in 2m" / "due now" — when a schedule fires next.
+fn until(ts_ms: i64) -> String {
+    let s = (ts_ms - now_ms()) / 1000;
+    match s {
+        i64::MIN..=0 => "due now".to_string(),
+        1..=59 => format!("in {s}s"),
+        60..=3599 => format!("in {}m", s / 60),
+        3600..=86399 => format!("in {}h", s / 3600),
+        _ => format!("in {}d", s / 86400),
     }
 }
 
@@ -137,6 +165,7 @@ struct WorkflowPage {
     journal: Vec<JRow>,
     upgradable: bool,
     modules: Vec<ModRow>,
+    kv: Vec<KvRow>,
 }
 
 #[derive(Template)]
@@ -150,6 +179,7 @@ struct WorkflowDetail {
     // Task 3.6 step 6: the upgrade control renders only when parked + snapshotted.
     upgradable: bool,
     modules: Vec<ModRow>,
+    kv: Vec<KvRow>,
 }
 
 #[derive(Template)]
@@ -157,6 +187,20 @@ struct WorkflowDetail {
 struct ModulesPage {
     modules: Vec<ModRow>,
     authed: bool,
+}
+
+#[derive(Template)]
+#[template(path = "schedules.html")]
+struct SchedulesPage {
+    schedules: Vec<SchedRow>,
+    modules: Vec<ModRow>,
+    authed: bool,
+}
+
+#[derive(Template)]
+#[template(path = "_schedules_table.html")]
+struct SchedulesTable {
+    schedules: Vec<SchedRow>,
 }
 
 #[derive(Template)]
@@ -217,12 +261,67 @@ fn mod_rows(conn: &keel_core::rusqlite::Connection) -> Result<Vec<ModRow>, UiErr
         .collect())
 }
 
+fn sched_rows(shared: &EngineShared) -> Result<Vec<SchedRow>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let mods: std::collections::HashMap<String, String> = db::list_modules(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|m| (m.hash.clone(), module_label(&m.name, &m.hash)))
+        .collect();
+    Ok(db::list_schedules(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|s| SchedRow {
+            short_id: short(&s.id),
+            module: mods
+                .get(&s.module_hash)
+                .cloned()
+                .unwrap_or_else(|| short(&s.module_hash)),
+            when: match &s.cron {
+                Some(c) => format!("cron {c}"),
+                None => format!("every {}s", s.interval_ms / 1000),
+            },
+            next: if s.enabled {
+                until(s.next_run_at)
+            } else {
+                "paused".to_string()
+            },
+            enabled: s.enabled,
+            id: s.id,
+        })
+        .collect())
+}
+
+/// GET /schedules
+pub async fn schedules_page(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let modules = mod_rows(&conn)?;
+    drop(conn);
+    render(SchedulesPage {
+        schedules: sched_rows(&shared)?,
+        modules,
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// GET /partials/schedules — the schedules <tbody>, polled every 2s.
+pub async fn schedules_partial(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Html<String>, UiErr> {
+    render(SchedulesTable {
+        schedules: sched_rows(&shared)?,
+    })
+}
+
 struct DetailParts {
     wf: db::WorkflowRow,
     module: String,
     journal: Vec<JRow>,
     upgradable: bool,
     modules: Vec<ModRow>,
+    kv: Vec<KvRow>,
 }
 
 fn detail_parts(shared: &EngineShared, id: &str) -> Result<DetailParts, UiErr> {
@@ -251,12 +350,22 @@ fn detail_parts(shared: &EngineShared, id: &str) -> Result<DetailParts, UiErr> {
     let upgradable = (wf.status == "sleeping" || wf.status == "waiting_event")
         && db::get_snapshot(&conn, id).map_err(internal)?.is_some();
     let modules = if upgradable { mod_rows(&conn)? } else { Vec::new() };
+    // v2.4 — latest version per key (values truncated like journal payloads).
+    let kv = db::kv_latest(&conn, id)
+        .map_err(internal)?
+        .into_iter()
+        .map(|(key, value)| KvRow {
+            key,
+            value: trunc(&value, 200),
+        })
+        .collect();
     Ok(DetailParts {
         wf,
         module,
         journal,
         upgradable,
         modules,
+        kv,
     })
 }
 
@@ -285,6 +394,7 @@ pub async fn workflow_page(
         journal: p.journal,
         upgradable: p.upgradable,
         modules: p.modules,
+        kv: p.kv,
     })
 }
 
@@ -302,6 +412,7 @@ pub async fn workflow_partial(
         journal: p.journal,
         upgradable: p.upgradable,
         modules: p.modules,
+        kv: p.kv,
     })
 }
 

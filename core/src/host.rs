@@ -257,6 +257,7 @@ impl keel::workflow::host_api::Host for Ctx {
         }
         let seq = self.j.next_seq;
         self.j.next_seq += 1;
+        let _span = tracing::info_span!("host_call", kind = "kv-set", seq).entered();
         let id = self.j.workflow_id.clone();
         let req_json = serde_json::to_string(&Req {
             key: key.clone(),
@@ -290,6 +291,7 @@ impl keel::workflow::host_api::Host for Ctx {
         }
         let seq = self.j.next_seq;
         self.j.next_seq += 1;
+        let _span = tracing::info_span!("host_call", kind = "kv-get", seq).entered();
         let id = self.j.workflow_id.clone();
         let req_json =
             serde_json::to_string(&Req { key: key.clone() }).map_err(|e| trap(e.into()))?;
@@ -330,6 +332,7 @@ impl keel::workflow::host_api::Host for Ctx {
         let id = self.j.workflow_id.clone();
         let req_json =
             serde_json::to_string(&Req { name: name.clone() }).map_err(|e| trap(e.into()))?;
+        let _span = tracing::info_span!("host_call", kind = "secret", seq).entered();
 
         let live = lookup_secret(self.secrets_path.as_deref(), &name);
 
@@ -470,6 +473,7 @@ impl keel::workflow::host_api::Host for Ctx {
         }
         let seq = self.j.next_seq;
         self.j.next_seq += 1;
+        let _span = tracing::info_span!("host_call", kind = "sleep-ms", seq).entered();
         let id = self.j.workflow_id.clone();
         let req_json = serde_json::to_string(&Req { ms }).map_err(|e| trap(e.into()))?;
 
@@ -557,6 +561,7 @@ impl keel::workflow::host_api::Host for Ctx {
         }
         let seq = self.j.next_seq;
         self.j.next_seq += 1;
+        let _span = tracing::info_span!("host_call", kind = "await-event", seq).entered();
         let id = self.j.workflow_id.clone();
         let req_json =
             serde_json::to_string(&Req { name: name.clone() }).map_err(|e| trap(e.into()))?;

@@ -39,8 +39,8 @@ fast-forwards deterministically to where it died. There is no separate replay mo
 
 ## Quick start
 
-Prebuilt engine binaries (Linux x86_64, macOS arm64) are attached to each
-[GitHub release](https://github.com/benoshea4/keel/releases) with sha256
+Prebuilt engine binaries (Linux x86_64 + arm64, macOS arm64) are attached to
+each [GitHub release](https://github.com/benoshea4/keel/releases) with sha256
 checksums — or build from source:
 
 ```bash

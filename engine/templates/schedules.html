@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — schedules</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Schedules</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  {# Same error surfacing as the workflow page: the hx-swap="none" buttons
+     below (pause/resume/delete) get their API error bodies shown here. #}
+  <p id="error" class="error" hidden></p>
+  <script>
+    document.body.addEventListener('htmx:responseError', function (e) {
+      var box = document.getElementById('error');
+      box.textContent = e.detail.xhr.responseText ||
+        'request failed with status ' + e.detail.xhr.status;
+      box.hidden = false;
+    });
+    document.body.addEventListener('htmx:sendError', function () {
+      var box = document.getElementById('error');
+      box.textContent = 'engine unreachable — is keel serve still running?';
+      box.hidden = false;
+    });
+  </script>
+
+  <table>
+    <thead>
+      <tr><th>Schedule</th><th>Module</th><th>Fires</th><th>Next</th><th></th><th></th></tr>
+    </thead>
+    <tbody hx-get="/partials/schedules" hx-trigger="every 2s" hx-swap="innerHTML">
+      {% include "_schedules_table.html" %}
+    </tbody>
+  </table>
+
+  <h2>Create schedule</h2>
+  {# Normal urlencoded form post — api::create_schedule accepts this alongside
+     JSON. Give interval_ms OR a 6-field cron (sec min hour dom mon dow, UTC);
+     leaving both (or filling both) is a 400 with the reason. #}
+  <form action="/api/schedules" method="post">
+    <label for="module_hash">Module</label>
+    <select id="module_hash" name="module_hash">
+      {% for m in modules %}
+      <option value="{{ m.hash }}">{{ m.name }} ({{ m.short_hash }})</option>
+      {% endfor %}
+    </select>
+    <label for="input">Input (JSON, handed to every spawned workflow)</label>
+    <textarea id="input" name="input" rows="3">{}</textarea>
+    <label for="interval_ms">Interval (ms, ≥1000) — or leave empty and use cron</label>
+    <input id="interval_ms" name="interval_ms" placeholder="60000">
+    <label for="cron">Cron (6 fields: sec min hour dom mon dow, UTC)</label>
+    <input id="cron" name="cron" placeholder="0 */5 * * * *">
+    <button type="submit">Create schedule</button>
+  </form>
+</body>
+</html>

@@ -104,6 +104,48 @@ enum Cmd {
     },
 }
 
+/// v2.4 — tracing init, shared by serve and fleet. Default build: the plain
+/// fmt subscriber, unchanged. With `--features otel` an OTLP/http span
+/// exporter is layered on top — the spans themselves come from keel-core
+/// (one per workflow run, one per journaled host call), so the default
+/// binary pays nothing and the otel binary exports real structure. Endpoint
+/// via the standard env (OTEL_EXPORTER_OTLP_ENDPOINT, default
+/// http://localhost:4318). kill -9 drops unexported spans — that is the
+/// engine's supported shutdown, so traces are best-effort by design.
+#[cfg(not(feature = "otel"))]
+fn init_tracing() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+    Ok(())
+}
+
+#[cfg(feature = "otel")]
+fn init_tracing() -> Result<()> {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .build()?;
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name("keel")
+                .build(),
+        )
+        .build();
+    let tracer = provider.tracer("keel");
+    opentelemetry::global::set_tracer_provider(provider);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -160,9 +202,7 @@ async fn serve(
     secrets_file: Option<String>,
     providers: Vec<String>,
 ) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    init_tracing()?;
 
     if api_token.is_none() {
         tracing::warn!(
@@ -342,6 +382,9 @@ async fn serve(
         .route("/workflows/{id}", get(ui::workflow_page))
         .route("/partials/workflows/{id}", get(ui::workflow_partial))
         .route("/modules", get(ui::modules_page))
+        // v2.4 — schedules UI (create/pause/resume/delete + 2s polling).
+        .route("/schedules", get(ui::schedules_page))
+        .route("/partials/schedules", get(ui::schedules_partial))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))
         // v1.1 — auth. The middleware wraps every route above; /login, /logout

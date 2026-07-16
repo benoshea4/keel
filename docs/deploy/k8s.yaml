@@ -1,0 +1,49 @@
+# Minimal single-replica Deployment. Keel is a single-writer engine by design:
+# replicas MUST stay 1 per database (cells scale by adding tenants, not
+# replicas of one tenant) — Recreate keeps two writers from ever overlapping.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keel
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: keel }
+  template:
+    metadata:
+      labels: { app: keel }
+    spec:
+      containers:
+        - name: keel
+          image: keel:latest # build docs/deploy/Dockerfile and push to your registry
+          args:
+            - serve
+            - --db=/var/lib/keel/keel.db
+            - --listen=0.0.0.0:8080
+            - --backup-dir=/var/lib/keel/backups
+          env:
+            - name: KEEL_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: keel-token, key: token }
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/keel
+          readinessProbe:
+            httpGet: { path: /login, port: 8080 }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: keel-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keel
+spec:
+  selector: { app: keel }
+  ports:
+    - port: 8080
+      targetPort: 8080

@@ -140,9 +140,7 @@ fn spawn_tenant(exe: &std::path::Path, t: &Tenant) -> Result<Child> {
 }
 
 pub async fn run(config_path: &str) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    crate::init_tracing()?;
     let raw = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading fleet config {config_path}"))?;
     let cfg: FleetConfig = toml::from_str(&raw).context("parsing fleet config")?;

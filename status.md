@@ -42,6 +42,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_embedded.sh                         # must print EMBEDDED SMOKE PASS (v2.2 crate split)
 ./scripts/smoke_providers.sh                        # must print PROVIDERS SMOKE PASS (v2.2)
 ./scripts/smoke_kv_upgrade.sh                       # must print KV-UPGRADE SMOKE PASS (v2.3)
+./scripts/load_test.sh                              # must print LOAD TEST PASS (v2.4, 200 wf / cap 8)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -351,6 +352,37 @@ J. *(v2.3, 2026-07-16 — kv versioning + idempotency keys; NO WIT bump)*
      version count assertions). 31 unit tests (kv versioned read/upgrade
      discard, checkpoint compaction, pre-v2.3 reshape, key injection
      inject/override/suppress).
+
+K. *(v2.4, 2026-07-16 — surface & scale polish; NO WIT bump)*
+   - **UI**: /schedules page (create form with interval-or-cron, 2s-polled
+     table, Pause/Resume via hx-patch + Delete via hx-delete — both endpoints
+     grew urlencoded form shapes alongside JSON for this) and a "Durable KV"
+     section on the workflow detail (db::kv_latest, truncated like journal
+     cells, hidden when empty). Schedules nav link on every page.
+   - **keel_active_permits** metric: threads actually holding a --max-running
+     permit (keel_worker_threads counts permit-WAITERS too — that distinction
+     is what makes the cap observable at all).
+   - **load_test.sh**: 200 loadgen workflows (new minimal guest: one http-get,
+     NO sleeps — the first draft used the demo guest and its 15s sleep turned
+     the gate into a nap-schedule benchmark, 32/200 in 60s; permits are held
+     while parked BY DESIGN) through --max-running 8 against stub /slow?ms=300.
+     Asserts: all 200 complete, permit gauge sampled every 200ms never exceeds
+     8 AND reaches exactly 8, per-workflow journals dense (COUNT == MAX+1),
+     exactly 200 http-get rows.
+   - **OTel behind `--features otel`** (binary feature; default build carries
+     zero OTel deps): span per workflow execution (runner.rs) with a child
+     span per journaled host call (journal.rs), exported OTLP/http via the
+     standard OTEL_* env. Side effect on ALL builds: fmt log lines now carry
+     span context (workflow{id=..}: host_call{kind=.. seq=..}:) — grep-based
+     gates unaffected (substring matches). Best-effort by design (kill -9
+     drops unexported spans). CI compile-gates the feature.
+   - **linux-arm64 release binaries** (aarch64-unknown-linux-gnu on
+     ubuntu-24.04-arm runners, free for public repos) — releases now carry 6
+     assets.
+   - **Deploy recipes** (docs/deploy/): systemd unit (EnvironmentFile token,
+     SIGKILL stop — hard kills are supported), 2-stage Dockerfile +
+     compose.yml, single-replica k8s (replicas MUST stay 1 per db; Recreate
+     strategy; scale = more cells).
 
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant

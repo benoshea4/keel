@@ -462,19 +462,57 @@ pub async fn list_workflows(
 /// v2.1: {"cron": "sec min hour dom mon dow"} (UTC, 6 fields) instead of
 /// interval_ms — exactly one of the two, validated here so a bad expression
 /// fails the request, not the scheduler thread.
+/// v2.4: also accepts the schedules page's urlencoded form (interval_ms/cron
+/// as text fields; empty string = absent).
 pub async fn create_schedule(
     State(shared): State<Arc<EngineShared>>,
-    Json(body): Json<Value>,
+    req: Request,
 ) -> Result<Json<Value>, ApiErr> {
-    let hash = body
-        .get("module_hash")
-        .and_then(Value::as_str)
-        .ok_or((StatusCode::BAD_REQUEST, "missing module_hash".to_string()))?;
-    let input = body
-        .get("input")
-        .ok_or((StatusCode::BAD_REQUEST, "missing input".to_string()))?;
-    let interval_ms = body.get("interval_ms").and_then(Value::as_i64);
-    let cron_expr = body.get("cron").and_then(Value::as_str);
+    let (hash, input, interval_ms, cron_expr): (String, Value, Option<i64>, Option<String>) =
+        if content_type(&req).starts_with("application/x-www-form-urlencoded") {
+            let Form(f) = Form::<HashMap<String, String>>::from_request(req, &())
+                .await
+                .map_err(bad)?;
+            let hash = f
+                .get("module_hash")
+                .cloned()
+                .ok_or((StatusCode::BAD_REQUEST, "missing module_hash".to_string()))?;
+            let text = f
+                .get("input")
+                .ok_or((StatusCode::BAD_REQUEST, "missing input".to_string()))?;
+            let input: Value = serde_json::from_str(text).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("input is not valid JSON ({e}) — send a JSON value, e.g. {{}}"),
+                )
+            })?;
+            let interval_ms = match f.get("interval_ms").map(String::as_str) {
+                None | Some("") => None,
+                Some(v) => Some(v.parse::<i64>().map_err(|_| {
+                    bad(format!("interval_ms must be an integer, got '{v}'"))
+                })?),
+            };
+            let cron = f.get("cron").filter(|c| !c.is_empty()).cloned();
+            (hash, input, interval_ms, cron)
+        } else {
+            let Json(body) = Json::<Value>::from_request(req, &()).await.map_err(bad)?;
+            let hash = body
+                .get("module_hash")
+                .and_then(Value::as_str)
+                .ok_or((StatusCode::BAD_REQUEST, "missing module_hash".to_string()))?
+                .to_string();
+            let input = body
+                .get("input")
+                .cloned()
+                .ok_or((StatusCode::BAD_REQUEST, "missing input".to_string()))?;
+            let interval_ms = body.get("interval_ms").and_then(Value::as_i64);
+            let cron = body
+                .get("cron")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            (hash, input, interval_ms, cron)
+        };
+    let (hash, input, cron_expr) = (hash.as_str(), &input, cron_expr.as_deref());
 
     let (interval_ms, first) = match (interval_ms, cron_expr) {
         (Some(_), Some(_)) => {
@@ -510,14 +548,26 @@ pub async fn create_schedule(
 /// PATCH /api/schedules/{id} — v2.1: {"enabled": true|false}. Pause/resume
 /// firing; a re-enabled interval schedule fires once for the paused gap (the
 /// collapse math), a cron schedule at its next expression match.
+/// v2.4: also accepts the schedules page's urlencoded form (enabled=true|false).
 pub async fn patch_schedule(
     State(shared): State<Arc<EngineShared>>,
     Path(id): Path<String>,
-    Json(body): Json<Value>,
+    req: Request,
 ) -> Result<Json<Value>, ApiErr> {
-    let enabled = body
-        .get("enabled")
-        .and_then(Value::as_bool)
+    let enabled = if content_type(&req).starts_with("application/x-www-form-urlencoded") {
+        let Form(f) = Form::<HashMap<String, String>>::from_request(req, &())
+            .await
+            .map_err(bad)?;
+        match f.get("enabled").map(String::as_str) {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => None,
+        }
+    } else {
+        let Json(body) = Json::<Value>::from_request(req, &()).await.map_err(bad)?;
+        body.get("enabled").and_then(Value::as_bool)
+    };
+    let enabled = enabled
         .ok_or((StatusCode::BAD_REQUEST, "missing enabled (boolean)".to_string()))?;
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     if db::set_schedule_enabled(&conn, &id, enabled).map_err(internal)? {
@@ -576,6 +626,11 @@ pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, 
     }
     out.push_str("# HELP keel_worker_threads Live workflow worker threads.\n# TYPE keel_worker_threads gauge\n");
     out.push_str(&format!("keel_worker_threads {}\n", shared.thread_count()));
+    // v2.4 — threads EXECUTING (holding a --max-running permit); worker
+    // threads beyond this are parked waiting for a slot. load_test.sh
+    // asserts this never exceeds the cap.
+    out.push_str("# HELP keel_active_permits Worker threads holding a --max-running permit.\n# TYPE keel_active_permits gauge\n");
+    out.push_str(&format!("keel_active_permits {}\n", shared.active_permits()));
     Ok(out)
 }
 

@@ -1,0 +1,39 @@
+# systemd unit for a single keel engine. Install:
+#   sudo install -m 755 keel /usr/local/bin/keel
+#   sudo useradd --system --home /var/lib/keel --create-home keel
+#   sudo install -m 600 -o keel /dev/null /var/lib/keel/secrets.env   # optional
+#   sudo cp keel.service /etc/systemd/system/ && sudo systemctl enable --now keel
+# For a fleet, run `keel fleet --config /var/lib/keel/fleet.toml` instead —
+# same unit, one line changed (Restart=always then also revives the supervisor,
+# which revives its cells).
+[Unit]
+Description=Keel durable workflow engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=keel
+WorkingDirectory=/var/lib/keel
+# Token via environment file so it never appears in argv (ps-visible).
+#   /var/lib/keel/keel.env:  KEEL_API_TOKEN=...
+EnvironmentFile=-/var/lib/keel/keel.env
+ExecStart=/usr/local/bin/keel serve \
+    --db /var/lib/keel/keel.db \
+    --listen 127.0.0.1:8080 \
+    --backup-dir /var/lib/keel/backups \
+    --retain-terminal-hours 720
+# Hard kill is a SUPPORTED shutdown (the journal makes it safe) — no need for
+# a generous stop timeout.
+TimeoutStopSec=5
+KillSignal=SIGKILL
+Restart=always
+RestartSec=1
+# Hardening: keel needs nothing outside its working directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/keel
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

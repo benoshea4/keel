@@ -1,0 +1,26 @@
+# v2.4 load-test guest — the smallest useful workflow: one journaled http-get
+# to the url in its input, return the byte count. scripts/load_test.sh runs
+# 200 of these through a small --max-running cap; no sleeps, so a permit is
+# held only as long as the fetch takes.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "loadgen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:loadgen"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"

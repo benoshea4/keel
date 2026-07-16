@@ -1,0 +1,21 @@
+{# Swapped into the schedules <tbody> every 2s. Pause/resume/delete are
+   hx-swap="none": the poll shows the effect within 2s; errors land in #error. #}
+{% if schedules.is_empty() %}
+<tr><td colspan="6">No schedules yet — create one below.</td></tr>
+{% endif %}
+{% for s in schedules %}
+<tr>
+  <td><code>{{ s.short_id }}</code></td>
+  <td>{{ s.module }}</td>
+  <td>{{ s.when }}</td>
+  <td>{{ s.next }}</td>
+  <td>
+    {% if s.enabled %}
+    <button hx-patch="/api/schedules/{{ s.id }}" hx-vals='{"enabled": "false"}' hx-swap="none">Pause</button>
+    {% else %}
+    <button hx-patch="/api/schedules/{{ s.id }}" hx-vals='{"enabled": "true"}' hx-swap="none">Resume</button>
+    {% endif %}
+  </td>
+  <td><button hx-delete="/api/schedules/{{ s.id }}" hx-swap="none" hx-confirm="Delete this schedule? Already-spawned workflows are untouched.">Delete</button></td>
+</tr>
+{% endfor %}

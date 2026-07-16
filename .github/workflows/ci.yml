@@ -24,6 +24,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --release --workspace --all-targets -- -D warnings
       - run: cargo test --release --workspace
+      # v2.4 — the otel feature must keep compiling (no collector in CI; the
+      # feature is exercised by compile + the span structure is in keel-core).
+      - run: cargo check --release -p keel-engine --features otel
 
   acceptance:
     runs-on: ubuntu-latest
@@ -62,6 +65,8 @@ jobs:
         run: ./scripts/smoke_providers.sh
       - name: KV-versioning upgrade smoke (v2.3)
         run: ./scripts/smoke_kv_upgrade.sh
+      - name: Load test — 200 workflows through a cap of 8 (v2.4)
+        run: ./scripts/load_test.sh
       - name: Engine log on failure
         if: failure()
         run: tail -100 engine.log || true

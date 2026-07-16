@@ -27,6 +27,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+          # v2.4 — native arm64 linux (public repos get free arm runners; no
+          # cross toolchain needed).
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             runner: macos-latest
     runs-on: ${{ matrix.runner }}

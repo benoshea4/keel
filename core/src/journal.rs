@@ -46,6 +46,10 @@ impl JournalCtx {
     {
         let seq = self.next_seq;
         self.next_seq += 1;
+        // v2.4 — one span per journaled call (nested under runner.rs's
+        // workflow span). Plain log output is unchanged; with the binary's
+        // `otel` feature these export as real trace structure.
+        let _span = tracing::info_span!("host_call", kind, seq).entered();
         let req_json = serde_json::to_string(req)?;
 
         let recorded: Option<(String, String, String)> = self

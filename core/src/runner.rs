@@ -145,6 +145,17 @@ impl EngineShared {
         self.max_running
     }
 
+    /// v2.4 — permits currently held (threads EXECUTING or parked, not the
+    /// ones still waiting on the cap). /metrics exposes it as
+    /// keel_active_permits; scripts/load_test.sh asserts it never exceeds
+    /// max_running.
+    pub fn active_permits(&self) -> u32 {
+        *self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Task 3.6 — the upgrade handler takes a parked worker's JoinHandle to join
     /// it after set_abort. None: the thread already exited.
     pub fn take_thread(&self, id: &str) -> Option<std::thread::JoinHandle<()>> {
@@ -194,6 +205,11 @@ pub fn preflight(shared: &EngineShared, hash: &str, wasm: &[u8]) -> Result<()> {
     let pre = linker.instantiate_pre(&component)?; // import surface check
     WorkflowPre::<Ctx>::new(pre)?; // run/resume export + type check
     Ok(())
+}
+
+/// First 8 chars — module hashes are long; spans want a label, not a key.
+fn short8(s: &str) -> String {
+    s.chars().take(8).collect()
 }
 
 /// Holds one --max-running permit. Released on ANY thread exit — Drop also runs
@@ -291,6 +307,9 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
     // Each thread owns a private Connection (SPEC.md §1); connections are never shared.
     let conn = db::open_conn(&shared.db_path)?;
     let wf = db::get_workflow(&conn, id)?.context("workflow row missing")?;
+    // v2.4 — the per-execution span every host_call span nests under.
+    let _span =
+        tracing::info_span!("workflow", id = %id, module = %short8(&wf.module_hash)).entered();
     let wasm = db::get_module_wasm(&conn, &wf.module_hash)?.context("module blob missing")?;
     let component = shared.component(&wf.module_hash, &wasm)?;
 

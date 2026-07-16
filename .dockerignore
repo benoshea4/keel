@@ -1,0 +1,11 @@
+# docs/deploy/Dockerfile builds from the repo root — keep build outputs and
+# local state out of the context (target/ alone can be gigabytes).
+target/
+guests/*/target/
+providers/*/target/
+*.db
+*.db-wal
+*.db-shm
+*.log
+smoke-dr-backups/
+.git/

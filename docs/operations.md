@@ -137,11 +137,30 @@ globex.keel.example.com { reverse_proxy 127.0.0.1:9102 }
 Run the fleet itself under systemd (`Restart=always`); if the supervisor dies,
 orphaned cells keep serving until systemd restarts the tree.
 
+## Deploying
+
+Copy-paste recipes in [`docs/deploy/`](deploy/): a hardened systemd unit
+([`keel.service`](deploy/keel.service) — token via EnvironmentFile,
+SIGKILL stop because hard kills are supported), a two-stage
+[`Dockerfile`](deploy/Dockerfile) + [`compose.yml`](deploy/compose.yml), and
+a single-replica [`k8s.yaml`](deploy/k8s.yaml) (**replicas must stay 1 per
+database** — one writer per journal; scale by adding tenant cells, not
+replicas; `strategy: Recreate` keeps two writers from overlapping).
+
 ## Monitoring
 
 `GET /metrics` (Prometheus text, behind the same token):
-`keel_workflows{status=...}` gauges and `keel_worker_threads`. Engine logs go
-to stdout (`tracing`, INFO).
+`keel_workflows{status=...}` gauges, `keel_worker_threads` (live worker
+threads, parked included) and `keel_active_permits` (threads actually holding
+a `--max-running` slot — this is the one that shows saturation). Engine logs
+go to stdout (`tracing`, INFO).
+
+**Traces (optional):** build with `cargo build --release -p keel-engine
+--features otel` and set `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+`http://localhost:4318`) — one span per workflow execution with a child span
+per journaled host call, exported via OTLP/http. The default binary carries
+none of the OTel dependency tree. Traces are best-effort: kill -9 (a
+supported shutdown) drops unexported spans.
 
 ## Upgrading the engine binary
 

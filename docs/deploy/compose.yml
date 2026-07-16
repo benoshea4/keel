@@ -1,0 +1,24 @@
+# docker compose -f docs/deploy/compose.yml up --build   (from the repo root:
+# docker compose -f docs/deploy/compose.yml --project-directory . up --build)
+# 0.0.0.0 inside the container is fine — the published port below pins it to
+# loopback on the host; put Caddy/nginx in front for anything wider.
+services:
+  keel:
+    build:
+      context: ../..
+      dockerfile: docs/deploy/Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      KEEL_API_TOKEN: ${KEEL_API_TOKEN:?set KEEL_API_TOKEN}
+    volumes:
+      - keel-data:/var/lib/keel
+    command:
+      - serve
+      - --db=/var/lib/keel/keel.db
+      - --listen=0.0.0.0:8080
+      - --backup-dir=/var/lib/keel/backups
+      - --retain-terminal-hours=720
+    restart: unless-stopped
+volumes:
+  keel-data:

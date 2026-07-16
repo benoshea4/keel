@@ -37,8 +37,16 @@ class H(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"posts": count, "auth": last_auth, "key": last_key}))
         elif self.path == "/body.txt":
             self._send(200, "stub body")
-        elif self.path == "/slow":
-            time.sleep(3)
+        elif self.path.startswith("/slow"):
+            # /slow?ms=N (default 3000) — the timeout target AND the load
+            # test's tunable per-workflow latency.
+            ms = 3000
+            if "ms=" in self.path:
+                try:
+                    ms = int(self.path.split("ms=")[1].split("&")[0])
+                except ValueError:
+                    pass
+            time.sleep(ms / 1000)
             try:
                 self._send(200, json.dumps({"slow": True}))
             except BrokenPipeError:

@@ -148,6 +148,30 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH localhost:8080/api/schedu
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE localhost:8080/api/schedules/$CRON)
 [ "$CODE" = "204" ] || { echo "FAIL: cron schedule delete returned $CODE"; exit 1; }
 
+# 4c. v2.4 schedules UI: the page renders and lists the schedule we created
+CRON2=$(curl -s -X POST localhost:8080/api/schedules \
+  -H 'content-type: application/json' \
+  -d "{\"module_hash\":\"$HC\",\"input\":{\"target\":0},\"cron\":\"0 0 12 * * *\"}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+PAGE=$(curl -s localhost:8080/schedules)
+echo "$PAGE" | grep -q "Create schedule" || { echo "FAIL: /schedules page missing the create form"; exit 1; }
+echo "$PAGE" | grep -q "${CRON2:0:8}"    || { echo "FAIL: /schedules page does not list the schedule"; exit 1; }
+echo "$PAGE" | grep -q "cron 0 0 12"     || { echo "FAIL: /schedules page does not show the cron expression"; exit 1; }
+# form-shape create (the page's POST) + form-shape PATCH
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/api/schedules \
+  --data-urlencode "module_hash=$HC" --data-urlencode 'input={"target":0}' \
+  --data-urlencode "interval_ms=" --data-urlencode "cron=0 30 9 * * 1-5")
+[ "$CODE" = "200" ] || { echo "FAIL: form-shape schedule create returned $CODE"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH localhost:8080/api/schedules/$CRON2 \
+  --data-urlencode "enabled=false")
+[ "$CODE" = "200" ] || { echo "FAIL: form-shape PATCH returned $CODE"; exit 1; }
+sqlite3 $DB "DELETE FROM schedules" # stop everything before the GC section
+
+# 4d. v2.4 kv on the workflow page (latest version per key)
+WPAGE=$(curl -s localhost:8080/workflows/$WF)
+echo "$WPAGE" | grep -q "Durable KV" || { echo "FAIL: workflow page missing the KV section"; exit 1; }
+echo "$WPAGE" | grep -q "phase"      || { echo "FAIL: workflow page KV section missing the key"; exit 1; }
+
 # 5. list API + metrics
 LC=$(curl -s "localhost:8080/api/workflows?status=completed&limit=2" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')
 [ "$LC" = "2" ] || { echo "FAIL: list limit=2 returned $LC rows"; exit 1; }
