@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — modules</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Modules</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a></nav>
+  </header>
+
+  <h2>Upload module</h2>
+  {# Normal multipart form post — api::upload_module accepts multipart alongside
+     raw wasm bytes (SPEC.md Task 2.8). The response is the module's JSON hash. #}
+  <form action="/api/modules" method="post" enctype="multipart/form-data">
+    <label for="name">Name</label>
+    <input id="name" name="name" placeholder="demo">
+    <label for="file">Component (.wasm, built with cargo component)</label>
+    <input id="file" name="file" type="file" required>
+    <button type="submit">Upload module</button>
+  </form>
+
+  <h2>Modules</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Hash</th><th>Uploaded</th></tr>
+    </thead>
+    <tbody>
+      {% if modules.is_empty() %}
+      <tr><td colspan="3">No modules yet — build a component with cargo component and upload it above.</td></tr>
+      {% endif %}
+      {% for m in modules %}
+      <tr>
+        <td>{{ m.name }}</td>
+        <td><code>{{ m.short_hash }}</code></td>
+        <td>{{ m.uploaded }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Start workflow</h2>
+  {# Normal urlencoded form post — api::create_workflow accepts this alongside
+     JSON. The response is the new workflow's JSON id. #}
+  <form action="/api/workflows" method="post">
+    <label for="module_hash">Module</label>
+    <select id="module_hash" name="module_hash">
+      {% for m in modules %}
+      <option value="{{ m.hash }}">{{ m.name }} ({{ m.short_hash }})</option>
+      {% endfor %}
+    </select>
+    <label for="input">Input (JSON)</label>
+    <textarea id="input" name="input" rows="3">{}</textarea>
+    <button type="submit">Start workflow</button>
+  </form>
+</body>
+</html>

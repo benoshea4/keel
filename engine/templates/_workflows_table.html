@@ -1,0 +1,12 @@
+{# Rows only — this partial is swapped into the dashboard's <tbody> (innerHTML). #}
+{% if workflows.is_empty() %}
+<tr><td colspan="4">No workflows yet — upload a module to start one.</td></tr>
+{% endif %}
+{% for w in workflows %}
+<tr>
+  <td><a href="/workflows/{{ w.id }}"><code>{{ w.short_id }}</code></a></td>
+  <td>{{ w.module }}</td>
+  <td><span class="badge {{ w.status }}">{{ w.status }}</span></td>
+  <td>{{ w.updated }}</td>
+</tr>
+{% endfor %}

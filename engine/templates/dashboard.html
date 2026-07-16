@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — workflows</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Workflows</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a></nav>
+  </header>
+  <table>
+    <thead>
+      <tr><th>Workflow</th><th>Module</th><th>Status</th><th>Updated</th></tr>
+    </thead>
+    {# hx attributes exactly per SPEC.md Task 2.8: the tbody re-fetches its rows
+       every 2s; the initial rows are the same partial, rendered inline. #}
+    <tbody hx-get="/partials/workflows" hx-trigger="every 2s" hx-swap="innerHTML">
+      {% include "_workflows_table.html" %}
+    </tbody>
+  </table>
+</body>
+</html>

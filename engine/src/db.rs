@@ -121,6 +121,66 @@ pub fn insert_module(c: &Connection, hash: &str, name: &str, wasm: &[u8]) -> Res
     Ok(())
 }
 
+// --- UI list queries (Task 2.8) ------------------------------------------------
+
+pub struct WorkflowListRow {
+    pub id: String,
+    pub module_name: String,
+    pub module_hash: String,
+    pub status: String,
+    pub updated_at: i64,
+}
+
+/// Dashboard rows, newest first.
+pub fn list_workflows(c: &Connection) -> Result<Vec<WorkflowListRow>> {
+    let mut stmt = c.prepare(
+        "SELECT w.id, m.name, w.module_hash, w.status, w.updated_at
+         FROM workflows w JOIN modules m ON m.hash = w.module_hash
+         ORDER BY w.created_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(WorkflowListRow {
+                id: r.get(0)?,
+                module_name: r.get(1)?,
+                module_hash: r.get(2)?,
+                status: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub struct ModuleRow {
+    pub hash: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
+pub fn list_modules(c: &Connection) -> Result<Vec<ModuleRow>> {
+    let mut stmt =
+        c.prepare("SELECT hash, name, created_at FROM modules ORDER BY created_at DESC")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ModuleRow {
+                hash: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_module_name(c: &Connection, hash: &str) -> Result<Option<String>> {
+    Ok(c
+        .query_row("SELECT name FROM modules WHERE hash = ?1", [hash], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
 pub fn module_exists(c: &Connection, hash: &str) -> Result<bool> {
     let row: Option<i64> = c
         .query_row("SELECT 1 FROM modules WHERE hash = ?1", [hash], |r| r.get(0))

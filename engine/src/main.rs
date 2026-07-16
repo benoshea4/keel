@@ -17,6 +17,7 @@ mod host;
 mod journal;
 mod notifier;
 mod runner;
+mod ui;
 
 use std::sync::Arc;
 
@@ -108,6 +109,14 @@ async fn serve(db_path: String, listen: String, max_running: u32) -> Result<()> 
         .route("/api/workflows/{id}", get(api::get_workflow))
         .route("/api/workflows/{id}/journal", get(api::get_journal))
         .route("/api/workflows/{id}/events", post(api::post_event))
+        // Task 2.8 — server-rendered UI + polling partials + embedded assets.
+        .route("/", get(ui::dashboard))
+        .route("/partials/workflows", get(ui::workflows_partial))
+        .route("/workflows/{id}", get(ui::workflow_page))
+        .route("/partials/workflows/{id}", get(ui::workflow_partial))
+        .route("/modules", get(ui::modules_page))
+        .route("/assets/htmx.min.js", get(ui::htmx_js))
+        .route("/assets/style.css", get(ui::style_css))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;

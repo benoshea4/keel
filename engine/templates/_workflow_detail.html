@@ -1,0 +1,26 @@
+{# Swapped into the detail <div> on the workflow page (innerHTML, every 2s). #}
+<p><span class="badge {{ status }}">{{ status }}</span></p>
+<h2>Input</h2>
+<pre>{{ input }}</pre>
+<h2>Output</h2>
+<pre>{{ output }}</pre>
+<h2>Journal</h2>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Kind</th><th>Request</th><th>Response</th><th>Time</th></tr>
+  </thead>
+  <tbody>
+    {% if journal.is_empty() %}
+    <tr><td colspan="5">No journal rows yet.</td></tr>
+    {% endif %}
+    {% for r in journal %}
+    <tr>
+      <td>{{ r.seq }}</td>
+      <td>{{ r.kind }}</td>
+      <td><pre>{{ r.request }}</pre></td>
+      <td><pre>{{ r.response }}</pre></td>
+      <td>{{ r.time }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

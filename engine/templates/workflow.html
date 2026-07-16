@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — workflow {{ short_id }}</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Workflow <code>{{ short_id }}</code></h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a></nav>
+  </header>
+  {# Full id on purpose: it is the copy-pasteable handle for the API (and what
+     the phase-2 acceptance script greps this page for). #}
+  <p>Module {{ module }} · id <code>{{ id }}</code></p>
+
+  <div hx-get="/partials/workflows/{{ id }}" hx-trigger="every 2s" hx-swap="innerHTML">
+    {% include "_workflow_detail.html" %}
+  </div>
+
+  <h2>Send event</h2>
+  {# hx-post sends the fields urlencoded; api::post_event accepts that alongside
+     JSON. hx-swap=none: the 202 has no body — the polled detail above shows the
+     effect within 2s. #}
+  <form hx-post="/api/workflows/{{ id }}/events" hx-swap="none">
+    <label for="name">Name</label>
+    <input id="name" name="name" placeholder="approve" required>
+    <label for="payload">Payload (JSON)</label>
+    <textarea id="payload" name="payload" rows="3">{}</textarea>
+    <button type="submit">Send event</button>
+  </form>
+</body>
+</html>
