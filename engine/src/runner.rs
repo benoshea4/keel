@@ -148,6 +148,7 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
         },
         http: shared.http.clone(),
         notifier: shared.notifier.clone(),
+        db_path: shared.db_path.clone(),
     };
     let mut store = Store::new(&shared.engine, ctx);
     let instance = Workflow::instantiate(&mut store, &component, &linker)?;

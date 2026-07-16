@@ -39,6 +39,9 @@ pub struct Ctx {
     pub http: ureq::Agent,
     /// Park-loop wake-ups + the phase-3 abort flag (Task 2.3).
     pub notifier: Arc<Notifier>,
+    /// For host calls whose journaled() exec closure needs its own scoped
+    /// Connection (checkpoint, Task 3.3) — exec can't borrow j.db.
+    pub db_path: String,
 }
 
 /// Sentinel error the park loops (sleep_ms, await_event) bail with when the
@@ -247,12 +250,32 @@ impl keel::workflow::host_api::Host for Ctx {
     }
 
     fn checkpoint(&mut self, state: Vec<u8>) -> wasmtime::Result<()> {
-        // Task 3.1 stub so the 0.3.0 bindings compile; the real snapshot + prune
-        // implementation lands in Task 3.3. Calling it before then traps the guest.
-        let _ = state;
-        Err(trap(anyhow::anyhow!(
-            "checkpoint is not implemented until Task 3.3"
-        )))
+        // Task 3.3 — logical checkpoint + journal pruning, via journaled() as the
+        // spec directs. Two subtleties:
+        //   * C is this call's OWN seq — read it before journaled() claims it.
+        //   * exec cannot borrow self.j.db (journaled holds &mut self), so it
+        //     opens a SCOPED second connection for the snapshot+prune transaction
+        //     (the one-connection-per-thread rule bends here, deliberately —
+        //     status.md deviation 13). That txn and the wrapper's row-C INSERT are
+        //     two separate transactions BY DESIGN ("the wrapper then inserts
+        //     journal row C as usual"): a crash between them leaves the snapshot
+        //     at C with row C missing, which recovery tolerates — resume starts at
+        //     next_seq = C+1 and never reads row C.
+        #[derive(Serialize)]
+        struct Req {
+            len: usize,
+        }
+        let c_seq = self.j.next_seq;
+        let id = self.j.workflow_id.clone();
+        let db_path = self.db_path.clone();
+        self.j
+            .journaled("checkpoint", &Req { len: state.len() }, move || {
+                let mut conn = db::open_conn(&db_path)?;
+                db::snapshot_and_prune(&mut conn, &id, c_seq, &state)?;
+                Ok(Empty {})
+            })
+            .map_err(trap)?;
+        Ok(())
     }
 
     fn log(&mut self, msg: String) -> wasmtime::Result<()> {

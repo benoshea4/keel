@@ -381,6 +381,36 @@ pub fn deliver_event_and_journal(
     Ok(Some(payload))
 }
 
+// --- Snapshots (Task 3.3 checkpoint / Task 3.4 resume) ---------------------------
+
+/// The exec side of the checkpoint host call, in ONE transaction: persist the
+/// state blob (keyed by workflow, replacing any older snapshot) and prune every
+/// journal row strictly below the checkpoint's own seq C. The snapshot copies the
+/// workflow's CURRENT module_hash — Task 3.4 asserts it still matches at resume,
+/// and the upgrade endpoint (3.6) rewrites both in step 4.
+/// Invariant afterwards: journal = row C (inserted by the journaled() wrapper,
+/// in a separate, later transaction) plus any rows > C.
+pub fn snapshot_and_prune(
+    c: &mut Connection,
+    workflow_id: &str,
+    c_seq: i64,
+    state: &[u8],
+) -> Result<()> {
+    let tx = c.transaction()?;
+    let n = tx.execute(
+        "INSERT OR REPLACE INTO snapshots (workflow_id, journal_seq, state, module_hash, created_at)
+         SELECT id, ?2, ?3, module_hash, ?4 FROM workflows WHERE id = ?1",
+        rusqlite::params![workflow_id, c_seq, state, now_ms()],
+    )?;
+    anyhow::ensure!(n == 1, "workflow row missing during checkpoint");
+    tx.execute(
+        "DELETE FROM journal WHERE workflow_id = ?1 AND seq < ?2",
+        rusqlite::params![workflow_id, c_seq],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Task 1.4 — this query IS the recovery implementation: every non-terminal workflow
 /// simply gets started again from seq 0; the journal turns re-execution into replay.
 pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {
