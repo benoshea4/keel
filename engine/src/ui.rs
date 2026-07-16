@@ -114,6 +114,7 @@ fn trunc(s: &str, max_chars: usize) -> String {
 #[template(path = "dashboard.html")]
 struct Dashboard {
     workflows: Vec<WfRow>,
+    authed: bool,
 }
 
 #[derive(Template)]
@@ -128,6 +129,7 @@ struct WorkflowPage {
     id: String,
     short_id: String,
     module: String,
+    authed: bool,
     // fields below are consumed by the included _workflow_detail.html
     status: String,
     input: String,
@@ -154,6 +156,7 @@ struct WorkflowDetail {
 #[template(path = "modules.html")]
 struct ModulesPage {
     modules: Vec<ModRow>,
+    authed: bool,
 }
 
 #[derive(Template)]
@@ -188,6 +191,7 @@ fn wf_rows(shared: &EngineShared) -> Result<Vec<WfRow>, UiErr> {
 pub async fn dashboard(State(shared): State<Arc<EngineShared>>) -> Result<Html<String>, UiErr> {
     render(Dashboard {
         workflows: wf_rows(&shared)?,
+        authed: shared.api_token.is_some(),
     })
 }
 
@@ -274,6 +278,7 @@ pub async fn workflow_page(
         short_id: short(&p.wf.id),
         id: p.wf.id,
         module: p.module,
+        authed: shared.api_token.is_some(),
         output: output_display(&p.wf.status, &p.wf.output),
         status: p.wf.status,
         input: p.wf.input,
@@ -304,7 +309,10 @@ pub async fn workflow_partial(
 pub async fn modules_page(State(shared): State<Arc<EngineShared>>) -> Result<Html<String>, UiErr> {
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     let modules = mod_rows(&conn)?;
-    render(ModulesPage { modules })
+    render(ModulesPage {
+        modules,
+        authed: shared.api_token.is_some(),
+    })
 }
 
 // --- v1.1 auth pages ---------------------------------------------------------------

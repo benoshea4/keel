@@ -108,6 +108,146 @@ impl keel::workflow::host_api::Host for Ctx {
         })
     }
 
+    fn http_request(
+        &mut self,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Option<String>,
+        retry_attempts: u32,
+    ) -> wasmtime::Result<Result<keel::workflow::host_api::HttpResponse, String>> {
+        // v1.2 — the general HTTP call. Everything that could vary is part of
+        // the journaled request, so replay verifies the guest still asks for
+        // the same call. Non-2xx is DATA (the response comes back as-is);
+        // only transport failures are Err. Retries are strictly opt-in
+        // (retry_attempts extra tries on transport/5xx) because auto-retrying
+        // a POST is a caller decision, not the engine's.
+        #[derive(Serialize)]
+        struct Req {
+            method: String,
+            url: String,
+            headers: Vec<(String, String)>,
+            body: Option<String>,
+            retry_attempts: u32,
+        }
+        #[derive(Serialize, Deserialize)]
+        #[serde(untagged)]
+        enum Resp {
+            Ok {
+                status: u16,
+                headers: Vec<(String, String)>,
+                body: String,
+            },
+            Err {
+                err: String,
+            },
+        }
+
+        let agent = self.http.clone();
+        let req = Req {
+            method,
+            url,
+            headers,
+            body,
+            retry_attempts,
+        };
+        let (m, u, h, b) = (
+            req.method.clone(),
+            req.url.clone(),
+            req.headers.clone(),
+            req.body.clone(),
+        );
+        let r = self
+            .j
+            .journaled("http-request", &req, move || {
+                Ok(match do_http_request(&agent, &m, &u, &h, b.as_deref(), retry_attempts) {
+                    Ok((status, headers, body)) => Resp::Ok {
+                        status,
+                        headers,
+                        body,
+                    },
+                    Err(e) => Resp::Err { err: e },
+                })
+            })
+            .map_err(trap)?;
+        Ok(match r {
+            Resp::Ok {
+                status,
+                headers,
+                body,
+            } => Ok(keel::workflow::host_api::HttpResponse {
+                status,
+                headers,
+                body,
+            }),
+            Resp::Err { err } => Err(err),
+        })
+    }
+
+    fn kv_set(&mut self, key: String, value: String) -> wasmtime::Result<()> {
+        // v1.2 — durable per-workflow KV. Hand-rolled like the park loops: the
+        // kv upsert and the journal row are ONE transaction (db.rs), so replay
+        // can safely skip the write — it provably committed with its row.
+        #[derive(Serialize)]
+        struct Req {
+            key: String,
+            value: String,
+        }
+        let seq = self.j.next_seq;
+        self.j.next_seq += 1;
+        let id = self.j.workflow_id.clone();
+        let req_json = serde_json::to_string(&Req {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .map_err(|e| trap(e.into()))?;
+
+        if let Some((rkind, rreq, _)) = db::get_journal_row(&self.j.db, &id, seq).map_err(trap)? {
+            if rkind != "kv-set" || rreq != req_json {
+                return Err(trap(anyhow::anyhow!(
+                    "nondeterministic replay at seq {seq}: recorded ({rkind}, {rreq}) \
+                     but live code produced (kv-set, {req_json})."
+                )));
+            }
+            return Ok(());
+        }
+        db::kv_set_and_journal(&mut self.j.db, &id, seq, &key, &value, &req_json).map_err(trap)?;
+        Ok(())
+    }
+
+    fn kv_get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
+        // v1.2 — journaled read: the value READ is recorded, so replay returns
+        // what this execution saw even if the row has changed since.
+        #[derive(Serialize)]
+        struct Req {
+            key: String,
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            v: Option<String>,
+        }
+        let seq = self.j.next_seq;
+        self.j.next_seq += 1;
+        let id = self.j.workflow_id.clone();
+        let req_json =
+            serde_json::to_string(&Req { key: key.clone() }).map_err(|e| trap(e.into()))?;
+
+        if let Some((rkind, rreq, rresp)) =
+            db::get_journal_row(&self.j.db, &id, seq).map_err(trap)?
+        {
+            if rkind != "kv-get" || rreq != req_json {
+                return Err(trap(anyhow::anyhow!(
+                    "nondeterministic replay at seq {seq}: recorded ({rkind}, {rreq}) \
+                     but live code produced (kv-get, {req_json})."
+                )));
+            }
+            let r: Resp = serde_json::from_str(&rresp)
+                .map_err(|e| trap(anyhow::Error::new(e).context("corrupt journal response")))?;
+            return Ok(r.v);
+        }
+        db::kv_get_and_journal(&mut self.j.db, &id, seq, &key, &req_json).map_err(trap)
+    }
+
     fn sleep_ms(&mut self, ms: u64) -> wasmtime::Result<()> {
         // Task 2.4 — durable sleep. Hand-rolled instead of journaled() because a
         // park loop sits between the replay check and the journal commit; the §0
@@ -298,6 +438,81 @@ impl keel::workflow::host_api::Host for Ctx {
 /// answered; asking again won't change its mind). This function runs inside the
 /// journaled() closure, so however many attempts happen here, exactly ONE journal
 /// row records the final outcome — replay sees a single result.
+/// (status, headers, 1 MiB-capped utf-8 body) — http-request's live-path output.
+type HttpOut = (u16, Vec<(String, String)>, String);
+
+/// v1.2 — live path of http-request. Returns (status, headers, body) for ANY
+/// HTTP status; only transport-level failures (and body reads that die) are
+/// Err. `retry_attempts` EXTRA tries apply to transport errors and 5xx — a 5xx
+/// on the final try comes back as data, since a response is a response.
+fn do_http_request(
+    agent: &ureq::Agent,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+    retry_attempts: u32,
+) -> Result<HttpOut, String> {
+    const BACKOFF_MS: [u64; 3] = [500, 1000, 2000];
+    // Cap: a guest asking for u32::MAX retries would pin its worker inside one
+    // host call — which cancel cannot interrupt. 8 extra tries (~16s of gaps +
+    // 9 × 30s worst-case timeouts) is the ceiling; guests wanting more should
+    // loop with sleep-ms between calls, which IS a cancellable park point.
+    let tries = (retry_attempts.min(8) as usize) + 1;
+    let mut last_err = String::new();
+    for attempt in 0..tries {
+        let mut req = agent.request(method, url);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        let result = match body {
+            Some(b) => req.send_string(b),
+            None => req.call(),
+        };
+        match result {
+            Ok(resp) => match read_response(resp) {
+                Ok(out) => return Ok(out),
+                // Body read died mid-stream: transport-class, retryable.
+                Err(e) => last_err = e,
+            },
+            // ureq folds non-2xx into Error::Status but hands the Response
+            // over — for http-request a status is DATA, not an error.
+            Err(ureq::Error::Status(code, resp)) => {
+                if code >= 500 && attempt + 1 < tries {
+                    last_err = format!("status {code}");
+                } else {
+                    return read_response(resp);
+                }
+            }
+            Err(e) => last_err = format!("transport: {e}"),
+        }
+        if attempt + 1 < tries {
+            std::thread::sleep(std::time::Duration::from_millis(
+                BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)],
+            ));
+        }
+    }
+    Err(last_err)
+}
+
+/// Status, headers (first value per name), and the 1 MiB-capped utf-8 body.
+fn read_response(resp: ureq::Response) -> Result<HttpOut, String> {
+    let status = resp.status();
+    let names = resp.headers_names();
+    let mut headers = Vec::with_capacity(names.len());
+    for n in names {
+        if let Some(v) = resp.header(&n) {
+            headers.push((n.clone(), v.to_string()));
+        }
+    }
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .take(1024 * 1024)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read error: {e}"))?;
+    Ok((status, headers, String::from_utf8_lossy(&buf).into_owned()))
+}
+
 fn do_http_get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
     // Backoff schedule per SPEC.md Task 2.6. With 3 attempts only the first two
     // gaps are reachable; the 2s slot is the schedule's next step if attempts are

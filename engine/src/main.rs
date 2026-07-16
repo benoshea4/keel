@@ -14,6 +14,7 @@
 mod api;
 mod auth;
 mod db;
+mod fleet;
 mod host;
 mod journal;
 mod notifier;
@@ -60,6 +61,39 @@ enum Cmd {
         /// fails (allocation error → trap) instead of eating the host.
         #[arg(long, default_value_t = 256)]
         max_guest_memory_mb: usize,
+        /// v1.3 — delete completed/failed workflows (and their journal, events,
+        /// snapshots, kv) this many hours after they finish. 0 = keep forever.
+        #[arg(long, default_value_t = 0)]
+        retain_terminal_hours: u64,
+        /// v2 DR — write periodic online snapshots (keel-<millis>.db) into this
+        /// directory. Consistent while running; restore = copy one back over
+        /// --db and start the engine.
+        #[arg(long)]
+        backup_dir: Option<String>,
+        /// v2 DR — seconds between snapshots (with --backup-dir).
+        #[arg(long, default_value_t = 300)]
+        backup_interval_secs: u64,
+        /// v2 DR — how many snapshots to keep in --backup-dir (oldest pruned).
+        #[arg(long, default_value_t = 24)]
+        backup_keep: usize,
+    },
+    /// One-shot consistent snapshot of a (possibly live) database, then exit.
+    Backup {
+        /// Source database path.
+        #[arg(long)]
+        db: String,
+        /// Destination file (a standalone .db; no -wal/-shm needed).
+        #[arg(long)]
+        to: String,
+    },
+    /// Run one keel per tenant from a TOML config (v2 cell tenancy) — spawns,
+    /// supervises and restarts `keel serve` children; each tenant gets its own
+    /// database, port and token. Hard-killing children is safe by design (the
+    /// journal), so the supervisor never asks nicely.
+    Fleet {
+        /// Path to the fleet config (see docs/operations.md for the format).
+        #[arg(long)]
+        config: String,
     },
 }
 
@@ -73,16 +107,45 @@ async fn main() -> Result<()> {
             max_running,
             api_token,
             max_guest_memory_mb,
-        } => serve(db, listen, max_running, api_token, max_guest_memory_mb).await,
+            retain_terminal_hours,
+            backup_dir,
+            backup_interval_secs,
+            backup_keep,
+        } => {
+            serve(
+                db,
+                listen,
+                max_running,
+                api_token,
+                max_guest_memory_mb,
+                retain_terminal_hours,
+                backup_dir,
+                backup_interval_secs,
+                backup_keep,
+            )
+            .await
+        }
+        Cmd::Backup { db, to } => {
+            let src = db::open_conn(&db)?;
+            db::backup_to(&src, &to)?;
+            println!("backed up {db} -> {to}");
+            Ok(())
+        }
+        Cmd::Fleet { config } => fleet::run(&config).await,
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 1:1 with the Serve CLI flags, nothing more
 async fn serve(
     db_path: String,
     listen: String,
     max_running: u32,
     api_token: Option<String>,
     max_guest_memory_mb: usize,
+    retain_terminal_hours: u64,
+    backup_dir: Option<String>,
+    backup_interval_secs: u64,
+    backup_keep: usize,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -123,9 +186,94 @@ async fn serve(
     }
     for id in resumable {
         tracing::info!("recovering workflow {id}");
-        runner::spawn(shared.clone(), id); // sanctioned spawn call-site 2 of 3 (§0)
+        runner::spawn(shared.clone(), id); // sanctioned spawn call-site 2 of 4 (§0)
     }
     drop(conn); // startup connection is done; every thread opens its own
+
+    // v1.2 — the scheduler loop: every second, fire due interval schedules by
+    // creating a workflow (born 'running' BEFORE spawn — same crash-safe
+    // ordering as the API path) and advancing next_run_at past now. Missed
+    // windows (engine downtime) collapse into ONE firing, by advance's math.
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let run = || -> Result<()> {
+                let mut conn = db::open_conn(&shared.db_path)?;
+                let now = journal::now_ms();
+                for s in db::due_schedules(&conn, now)? {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    // One txn: workflow row + advanced next_run_at — a crash
+                    // can't double-fire a window (the row is the intent record;
+                    // recovery starts it if we die before spawn).
+                    db::fire_schedule(&mut conn, &s, &id, now)?;
+                    tracing::info!("schedule {} fired: workflow {id}", s.id);
+                    runner::spawn(shared.clone(), id); // sanctioned spawn call-site 4 of 4
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                tracing::error!("scheduler pass failed: {e:#}");
+            }
+        });
+    }
+
+    // v2 DR — periodic online snapshots. First one runs immediately so a fresh
+    // deployment has a restore point before anything can go wrong.
+    if let Some(dir) = backup_dir {
+        let db_path = db_path.clone();
+        std::thread::spawn(move || loop {
+            let run = || -> Result<()> {
+                std::fs::create_dir_all(&dir)?;
+                let src = db::open_conn(&db_path)?;
+                let dest = format!("{dir}/keel-{}.db", journal::now_ms());
+                db::backup_to(&src, &dest)?;
+                tracing::info!("backup written: {dest}");
+                // Prune: keel-<millis>.db sorts lexicographically by age
+                // (fixed-width millis until the year 2286).
+                let mut snaps: Vec<_> = std::fs::read_dir(&dir)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("keel-") && n.ends_with(".db"))
+                    })
+                    .collect();
+                snaps.sort();
+                while snaps.len() > backup_keep.max(1) {
+                    let old = snaps.remove(0);
+                    std::fs::remove_file(&old)?;
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                tracing::error!("backup pass failed: {e:#}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(backup_interval_secs.max(1)));
+        });
+    }
+
+    // v1.3 — retention GC: sweep terminal workflows past the retention window.
+    // First pass runs immediately (an engine restarted after long downtime
+    // should not wait a minute to reclaim space), then every 60s.
+    if retain_terminal_hours > 0 {
+        let shared = shared.clone();
+        std::thread::spawn(move || loop {
+            let run = || -> Result<()> {
+                let mut conn = db::open_conn(&shared.db_path)?;
+                let cutoff = journal::now_ms() - (retain_terminal_hours as i64) * 3_600_000;
+                let n = db::gc_terminal_workflows(&mut conn, cutoff)?;
+                if n > 0 {
+                    tracing::info!("retention GC removed {n} terminal workflows");
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                tracing::error!("retention GC pass failed: {e:#}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        });
+    }
 
     let app = Router::new()
         .route(
@@ -133,7 +281,20 @@ async fn serve(
             // Raw wasm bytes as the body; axum's ~2MB default rejects real components.
             post(api::upload_module).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
-        .route("/api/workflows", post(api::create_workflow))
+        .route(
+            "/api/workflows",
+            post(api::create_workflow).get(api::list_workflows),
+        )
+        // v1.2 — interval schedules; v1.3 — Prometheus metrics.
+        .route(
+            "/api/schedules",
+            post(api::create_schedule).get(api::list_schedules),
+        )
+        .route(
+            "/api/schedules/{id}",
+            axum::routing::delete(api::delete_schedule),
+        )
+        .route("/metrics", get(api::metrics))
         // NOTE: axum 0.8 path-param syntax is {id}. The spec's route table shows the
         // 0.7-era ":id", which PANICS at router build time in 0.8 (status.md dev. 1).
         .route("/api/workflows/{id}", get(api::get_workflow))

@@ -2,10 +2,35 @@
 // 0.2.0 added await-event (a new import — non-breaking once guests rebuilt).
 // 0.3.0 added checkpoint + the resume EXPORT — a BREAKING change: every guest must
 // implement resume (a stub `Err("no checkpoints")` suffices) and be rebuilt.
+// 0.4.0 (v1.2) added http-request, kv-get, kv-set — new imports only; guests
+// need a rebuild, their source is untouched. (0.x minors are still blob-
+// incompatible: components compiled against 0.3.0 will not instantiate.)
 // Never edit an interface in place mid-phase.
-package keel:workflow@0.3.0;
+package keel:workflow@0.4.0;
 
 interface host-api {
+    /// v1.2 — http-request's result. status is the raw code (2xx not special);
+    /// headers are response headers as received (name, value) pairs.
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    /// v1.2 — the general journaled HTTP call. Unlike http-get, a non-2xx
+    /// status is NOT an error: the response comes back whatever the status,
+    /// and only transport failures are `err`. `retry-attempts` (0 = none)
+    /// opts into retrying transport errors and 5xx — the caller decides,
+    /// because auto-retrying a non-idempotent POST is not the engine's call.
+    /// Response bodies are utf-8, truncated by the host to 1 MiB.
+    http-request: func(
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<string>,
+        retry-attempts: u32,
+    ) -> result<http-response, string>;
+
     /// Journaled HTTP GET. ok = response body (utf-8, truncated by host to 1 MiB),
     /// err = human-readable error string. Non-2xx status is an err.
     http-get: func(url: string) -> result<string, string>;
@@ -29,6 +54,14 @@ interface host-api {
     /// via resume(state) instead of run(input), and prunes journal rows older than
     /// the checkpoint.
     checkpoint: func(state: list<u8>);
+
+    /// v1.2 — journaled durable KV, scoped to this workflow. State that must
+    /// survive crashes without checkpoint gymnastics. Values live until the
+    /// workflow is garbage-collected.
+    kv-set: func(key: string, value: string);
+
+    /// v1.2 — journaled read of this workflow's KV. `none` if never set.
+    kv-get: func(key: string) -> option<string>;
 
     /// NOT journaled as an effect: forwarded to engine logs, tagged with the
     /// workflow id. Free to call; returns nothing; identical on replay by

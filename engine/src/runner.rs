@@ -1,10 +1,12 @@
 // runner.rs — Task 1.3: one OS thread per active workflow + wasmtime setup.
 //
-// runner::spawn is called from EXACTLY three places, ever (SPEC.md §0):
+// runner::spawn is called from EXACTLY four places, ever (SPEC.md §0 said
+// three; v1.2 added the scheduler as the one sanctioned amendment):
 //   1. workflow creation            (api.rs::create_workflow)
 //   2. the startup recovery scan    (main.rs::serve)
-//   3. step 5 of the phase-3 upgrade handler (not built yet)
-// Adding a fourth call-site is an architecture error — don't.
+//   3. step 5 of the phase-3 upgrade handler (api.rs::upgrade_workflow)
+//   4. the v1.2 scheduler loop      (main.rs::serve, interval schedules)
+// Adding a fifth call-site is an architecture error — don't.
 //
 // Status transitions (SPEC.md §5): the TERMINAL ones (→ completed | failed) live
 // in the result match below and nowhere else. The parked round-trips
@@ -116,6 +118,11 @@ impl EngineShared {
     /// (which would let step 5 race a live worker on the same journal).
     pub fn put_thread(&self, id: &str, h: std::thread::JoinHandle<()>) {
         self.threads.lock().unwrap().insert(id.to_string(), h);
+    }
+
+    /// v1.3 — /metrics: live worker threads (registry size).
+    pub fn thread_count(&self) -> usize {
+        self.threads.lock().unwrap().len()
     }
 
     /// pub for the upgrade pre-flight (api.rs via preflight() below); the cache

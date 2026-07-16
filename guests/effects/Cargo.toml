@@ -1,0 +1,26 @@
+# v1.2 acceptance guest — exercises the effect surface added in WIT 0.4.0:
+# http-request (POST with headers/body, 404-as-data), kv-set/kv-get, plus a
+# sleep so scripts/smoke_effects.sh can kill -9 mid-run and prove the new
+# calls REPLAY instead of re-executing (the stub counts POSTs).
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "effects"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:effects"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"

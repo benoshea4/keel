@@ -102,6 +102,26 @@ CREATE INDEX IF NOT EXISTS idx_events_undelivered
 -- the dashboard sorts every workflow by recency on every 2s poll
 CREATE INDEX IF NOT EXISTS idx_workflows_created_at
     ON workflows (created_at);
+
+-- v1.2 additions (appended, never ALTERed).
+
+CREATE TABLE IF NOT EXISTS kv (
+    workflow_id TEXT NOT NULL REFERENCES workflows(id),
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (workflow_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id           TEXT PRIMARY KEY,          -- uuid v4
+    module_hash  TEXT NOT NULL REFERENCES modules(hash),
+    input        TEXT NOT NULL,             -- JSON handed to every spawned workflow
+    interval_ms  INTEGER NOT NULL,
+    next_run_at  INTEGER NOT NULL,          -- unix millis
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   INTEGER NOT NULL
+);
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
@@ -423,6 +443,223 @@ pub fn deliver_event_and_journal(
     Ok(Some(payload))
 }
 
+// --- KV (v1.2) -------------------------------------------------------------------
+// Same discipline as event delivery: the state write and its journal row are ONE
+// transaction, and the caller (host.rs) runs the replay check first.
+
+/// kv-set's live path: upsert the key and journal the call atomically.
+pub fn kv_set_and_journal(
+    c: &mut Connection,
+    workflow_id: &str,
+    seq: i64,
+    key: &str,
+    value: &str,
+    req_json: &str,
+) -> Result<()> {
+    let tx = c.transaction()?;
+    tx.execute(
+        "INSERT INTO kv (workflow_id, key, value, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (workflow_id, key) DO UPDATE SET value = ?3, updated_at = ?4",
+        rusqlite::params![workflow_id, key, value, now_ms()],
+    )?;
+    insert_journal_row(&tx, workflow_id, seq, "kv-set", req_json, "{}")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// kv-get's live path: read the key and journal what was read atomically —
+/// replay then returns the recorded value even if the row changed later.
+pub fn kv_get_and_journal(
+    c: &mut Connection,
+    workflow_id: &str,
+    seq: i64,
+    key: &str,
+    req_json: &str,
+) -> Result<Option<String>> {
+    let tx = c.transaction()?;
+    let v: Option<String> = tx
+        .query_row(
+            "SELECT value FROM kv WHERE workflow_id = ?1 AND key = ?2",
+            rusqlite::params![workflow_id, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let resp = serde_json::to_string(&serde_json::json!({ "v": v }))?;
+    insert_journal_row(&tx, workflow_id, seq, "kv-get", req_json, &resp)?;
+    tx.commit()?;
+    Ok(v)
+}
+
+// --- Schedules (v1.2) --------------------------------------------------------------
+
+pub struct ScheduleRow {
+    pub id: String,
+    pub module_hash: String,
+    pub input: String,
+    pub interval_ms: i64,
+    pub next_run_at: i64,
+    pub enabled: bool,
+}
+
+pub fn insert_schedule(
+    c: &Connection,
+    id: &str,
+    module_hash: &str,
+    input_json: &str,
+    interval_ms: i64,
+    first_run_at: i64,
+) -> Result<()> {
+    c.execute(
+        "INSERT INTO schedules (id, module_hash, input, interval_ms, next_run_at, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+        rusqlite::params![id, module_hash, input_json, interval_ms, first_run_at, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn list_schedules(c: &Connection) -> Result<Vec<ScheduleRow>> {
+    let mut stmt = c.prepare(
+        "SELECT id, module_hash, input, interval_ms, next_run_at, enabled
+         FROM schedules ORDER BY created_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ScheduleRow {
+                id: r.get(0)?,
+                module_hash: r.get(1)?,
+                input: r.get(2)?,
+                interval_ms: r.get(3)?,
+                next_run_at: r.get(4)?,
+                enabled: r.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn delete_schedule(c: &Connection, id: &str) -> Result<bool> {
+    Ok(c.execute("DELETE FROM schedules WHERE id = ?1", [id])? > 0)
+}
+
+/// Enabled schedules whose next_run_at has passed.
+pub fn due_schedules(c: &Connection, now: i64) -> Result<Vec<ScheduleRow>> {
+    let mut stmt = c.prepare(
+        "SELECT id, module_hash, input, interval_ms, next_run_at, enabled
+         FROM schedules WHERE enabled = 1 AND next_run_at <= ?1",
+    )?;
+    let rows = stmt
+        .query_map([now], |r| {
+            Ok(ScheduleRow {
+                id: r.get(0)?,
+                module_hash: r.get(1)?,
+                input: r.get(2)?,
+                interval_ms: r.get(3)?,
+                next_run_at: r.get(4)?,
+                enabled: r.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Push next_run_at past `now` in whole intervals — a schedule that missed
+/// windows (engine was down) fires ONCE for the gap, not once per miss.
+pub fn advance_schedule(c: &Connection, id: &str, now: i64) -> Result<()> {
+    c.execute(
+        "UPDATE schedules
+         SET next_run_at = next_run_at
+             + ((MAX(?2 - next_run_at, 0) / interval_ms) + 1) * interval_ms
+         WHERE id = ?1",
+        rusqlite::params![id, now],
+    )?;
+    Ok(())
+}
+
+/// Fire one due schedule: create its workflow AND advance next_run_at in ONE
+/// transaction. The workflow row doubles as the intent record — a crash leaves
+/// either "not fired" (still due next pass) or "fired and advanced" (recovery
+/// starts the created workflow). A create→advance gap would double-fire.
+pub fn fire_schedule(
+    c: &mut Connection,
+    s: &ScheduleRow,
+    workflow_id: &str,
+    now: i64,
+) -> Result<()> {
+    let tx = c.transaction()?;
+    create_workflow(&tx, workflow_id, &s.module_hash, &s.input)?;
+    advance_schedule(&tx, &s.id, now)?;
+    tx.commit()?;
+    Ok(())
+}
+
+// --- Listing + retention (v1.3) ----------------------------------------------------
+
+/// Paged workflow listing for the API; optional status filter.
+pub fn list_workflows_page(
+    c: &Connection,
+    status: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowRow>> {
+    let mut stmt = c.prepare(
+        "SELECT id, module_hash, input, status, output, created_at, updated_at
+         FROM workflows
+         WHERE (?1 IS NULL OR status = ?1)
+         ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![status, limit, offset], |r| {
+            Ok(WorkflowRow {
+                id: r.get(0)?,
+                module_hash: r.get(1)?,
+                input: r.get(2)?,
+                status: r.get(3)?,
+                output: r.get(4)?,
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Retention GC: drop terminal (completed/failed) workflows untouched since
+/// `cutoff_ms`, with every dependent row, in ONE transaction. Returns how many
+/// workflows were removed. Live workflows are never eligible.
+pub fn gc_terminal_workflows(c: &mut Connection, cutoff_ms: i64) -> Result<usize> {
+    let tx = c.transaction()?;
+    let ids: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM workflows
+             WHERE status IN ('completed','failed') AND updated_at < ?1",
+        )?;
+        let ids = stmt
+            .query_map([cutoff_ms], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
+    for id in &ids {
+        for table in ["journal", "timers", "events", "snapshots", "kv"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE workflow_id = ?1"),
+                [id],
+            )?;
+        }
+        tx.execute("DELETE FROM workflows WHERE id = ?1", [id])?;
+    }
+    tx.commit()?;
+    Ok(ids.len())
+}
+
+/// Status counts for /metrics.
+pub fn status_counts(c: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = c.prepare("SELECT status, COUNT(*) FROM workflows GROUP BY status")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 // --- Snapshots (Task 3.3 checkpoint / Task 3.4 resume) ---------------------------
 
 /// The exec side of the checkpoint host call, in ONE transaction: persist the
@@ -511,6 +748,18 @@ pub fn upgrade_module_txn(
         rusqlite::params![workflow_id, new_hash],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// v2 DR — one consistent online snapshot of the live database into
+/// `dest_path` (SQLite backup API: safe while workflows are writing; the
+/// result is a fully-checkpointed standalone .db, no -wal/-shm needed).
+/// Restore = stop engine, copy the file over the db path, start engine —
+/// recovery replays everything non-terminal as usual.
+pub fn backup_to(src: &Connection, dest_path: &str) -> Result<()> {
+    let mut dst = Connection::open(dest_path)?;
+    let bk = rusqlite::backup::Backup::new(src, &mut dst)?;
+    bk.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
     Ok(())
 }
 

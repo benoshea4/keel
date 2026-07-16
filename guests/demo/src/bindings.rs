@@ -138,6 +138,252 @@ pub mod keel {
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
             use super::super::super::_rt;
+            /// v1.2 — http-request's result. status is the raw code (2xx not special);
+            /// headers are response headers as received (name, value) pairs.
+            #[derive(Clone)]
+            pub struct HttpResponse {
+                pub status: u16,
+                pub headers: _rt::Vec<(_rt::String, _rt::String)>,
+                pub body: _rt::String,
+            }
+            impl ::core::fmt::Debug for HttpResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("HttpResponse")
+                        .field("status", &self.status)
+                        .field("headers", &self.headers)
+                        .field("body", &self.body)
+                        .finish()
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// v1.2 — the general journaled HTTP call. Unlike http-get, a non-2xx
+            /// status is NOT an error: the response comes back whatever the status,
+            /// and only transport failures are `err`. `retry-attempts` (0 = none)
+            /// opts into retrying transport errors and 5xx — the caller decides,
+            /// because auto-retrying a non-idempotent POST is not the engine's call.
+            /// Response bodies are utf-8, truncated by the host to 1 MiB.
+            pub fn http_request(
+                method: &str,
+                url: &str,
+                headers: &[(_rt::String, _rt::String)],
+                body: Option<&str>,
+                retry_attempts: u32,
+            ) -> Result<HttpResponse, _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 6 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 6
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = method;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let vec1 = url;
+                    let ptr1 = vec1.as_ptr().cast::<u8>();
+                    let len1 = vec1.len();
+                    let vec5 = headers;
+                    let len5 = vec5.len();
+                    let layout5 = _rt::alloc::Layout::from_size_align_unchecked(
+                        vec5.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let result5 = if layout5.size() != 0 {
+                        let ptr = _rt::alloc::alloc(layout5).cast::<u8>();
+                        if ptr.is_null() {
+                            _rt::alloc::handle_alloc_error(layout5);
+                        }
+                        ptr
+                    } else {
+                        ::core::ptr::null_mut()
+                    };
+                    for (i, e) in vec5.into_iter().enumerate() {
+                        let base = result5
+                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                        {
+                            let (t2_0, t2_1) = e;
+                            let vec3 = t2_0;
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            *base
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *base.add(0).cast::<*mut u8>() = ptr3.cast_mut();
+                            let vec4 = t2_1;
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            *base
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *base
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    }
+                    let (result7_0, result7_1, result7_2) = match body {
+                        Some(e) => {
+                            let vec6 = e;
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            (1i32, ptr6.cast_mut(), len6)
+                        }
+                        None => (0i32, ::core::ptr::null_mut(), 0usize),
+                    };
+                    let ptr8 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    unsafe extern "C" {
+                        #[link_name = "http-request"]
+                        fn wit_import9(
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                            _: usize,
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: i32,
+                            _: *mut u8,
+                        );
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import9(
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                        _: i32,
+                        _: *mut u8,
+                        _: usize,
+                        _: i32,
+                        _: *mut u8,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe {
+                        wit_import9(
+                            ptr0.cast_mut(),
+                            len0,
+                            ptr1.cast_mut(),
+                            len1,
+                            result5,
+                            len5,
+                            result7_0,
+                            result7_1,
+                            result7_2,
+                            _rt::as_i32(&retry_attempts),
+                            ptr8,
+                        )
+                    };
+                    let l10 = i32::from(*ptr8.add(0).cast::<u8>());
+                    let result27 = match l10 {
+                        0 => {
+                            let e = {
+                                let l11 = i32::from(
+                                    *ptr8.add(::core::mem::size_of::<*const u8>()).cast::<u16>(),
+                                );
+                                let l12 = *ptr8
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l13 = *ptr8
+                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let base20 = l12;
+                                let len20 = l13;
+                                let mut result20 = _rt::Vec::with_capacity(len20);
+                                for i in 0..len20 {
+                                    let base = base20
+                                        .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                    let e20 = {
+                                        let l14 = *base.add(0).cast::<*mut u8>();
+                                        let l15 = *base
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let len16 = l15;
+                                        let bytes16 = _rt::Vec::from_raw_parts(
+                                            l14.cast(),
+                                            len16,
+                                            len16,
+                                        );
+                                        let l17 = *base
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l18 = *base
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let len19 = l18;
+                                        let bytes19 = _rt::Vec::from_raw_parts(
+                                            l17.cast(),
+                                            len19,
+                                            len19,
+                                        );
+                                        (_rt::string_lift(bytes16), _rt::string_lift(bytes19))
+                                    };
+                                    result20.push(e20);
+                                }
+                                _rt::cabi_dealloc(
+                                    base20,
+                                    len20 * (4 * ::core::mem::size_of::<*const u8>()),
+                                    ::core::mem::size_of::<*const u8>(),
+                                );
+                                let l21 = *ptr8
+                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l22 = *ptr8
+                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len23 = l22;
+                                let bytes23 = _rt::Vec::from_raw_parts(
+                                    l21.cast(),
+                                    len23,
+                                    len23,
+                                );
+                                HttpResponse {
+                                    status: l11 as u16,
+                                    headers: result20,
+                                    body: _rt::string_lift(bytes23),
+                                }
+                            };
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l24 = *ptr8
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l25 = *ptr8
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len26 = l25;
+                                let bytes26 = _rt::Vec::from_raw_parts(
+                                    l24.cast(),
+                                    len26,
+                                    len26,
+                                );
+                                _rt::string_lift(bytes26)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    if layout5.size() != 0 {
+                        _rt::alloc::dealloc(result5.cast(), layout5);
+                    }
+                    result27
+                }
+            }
             #[allow(unused_unsafe, clippy::all)]
             /// Journaled HTTP GET. ok = response body (utf-8, truncated by host to 1 MiB),
             /// err = human-readable error string. Non-2xx status is an err.
@@ -159,7 +405,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "http-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -217,7 +463,7 @@ pub mod keel {
             pub fn sleep_ms(ms: u64) -> () {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "sleep-ms"]
                         fn wit_import0(_: i64);
@@ -234,7 +480,7 @@ pub mod keel {
             pub fn now_ms() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "now-ms"]
                         fn wit_import0() -> i64;
@@ -252,7 +498,7 @@ pub mod keel {
             pub fn random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "random-u64"]
                         fn wit_import0() -> i64;
@@ -286,7 +532,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "await-event"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -318,7 +564,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "checkpoint"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -331,6 +577,92 @@ pub mod keel {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
+            /// v1.2 — journaled durable KV, scoped to this workflow. State that must
+            /// survive crashes without checkpoint gymnastics. Values live until the
+            /// workflow is garbage-collected.
+            pub fn kv_set(key: &str, value: &str) -> () {
+                unsafe {
+                    let vec0 = key;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let vec1 = value;
+                    let ptr1 = vec1.as_ptr().cast::<u8>();
+                    let len1 = vec1.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    unsafe extern "C" {
+                        #[link_name = "kv-set"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8, _: usize);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import2(ptr0.cast_mut(), len0, ptr1.cast_mut(), len1) };
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// v1.2 — journaled read of this workflow's KV. `none` if never set.
+            pub fn kv_get(key: &str) -> Option<_rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = key;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    unsafe extern "C" {
+                        #[link_name = "kv-get"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(_: *mut u8, _: usize, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import2(ptr0.cast_mut(), len0, ptr1) };
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result7 = match l3 {
+                        0 => None,
+                        1 => {
+                            let e = {
+                                let l4 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l5 = *ptr1
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                let bytes6 = _rt::Vec::from_raw_parts(
+                                    l4.cast(),
+                                    len6,
+                                    len6,
+                                );
+                                _rt::string_lift(bytes6)
+                            };
+                            Some(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result7
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
             /// NOT journaled as an effect: forwarded to engine logs, tagged with the
             /// workflow id. Free to call; returns nothing; identical on replay by
             /// construction (log is simply not sequence-numbered at all — see SPEC.md §4.1).
@@ -340,7 +672,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.3.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -358,14 +690,81 @@ pub mod keel {
 #[rustfmt::skip]
 mod _rt {
     #![allow(dead_code, clippy::all)]
-    pub use alloc_crate::string::String;
     pub use alloc_crate::vec::Vec;
+    pub use alloc_crate::string::String;
+    pub use alloc_crate::alloc;
+    pub fn as_i32<T: AsI32>(t: T) -> i32 {
+        t.as_i32()
+    }
+    pub trait AsI32 {
+        fn as_i32(self) -> i32;
+    }
+    impl<'a, T: Copy + AsI32> AsI32 for &'a T {
+        fn as_i32(self) -> i32 {
+            (*self).as_i32()
+        }
+    }
+    impl AsI32 for i32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for char {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for usize {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
     pub unsafe fn string_lift(bytes: Vec<u8>) -> String {
         if cfg!(debug_assertions) {
             String::from_utf8(bytes).unwrap()
         } else {
             String::from_utf8_unchecked(bytes)
         }
+    }
+    pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
+        if size == 0 {
+            return;
+        }
+        let layout = alloc::Layout::from_size_align_unchecked(size, align);
+        alloc::dealloc(ptr, layout);
     }
     pub unsafe fn invalid_enum_discriminant<T>() -> T {
         if cfg!(debug_assertions) {
@@ -401,15 +800,7 @@ mod _rt {
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
     }
-    pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
-        if size == 0 {
-            return;
-        }
-        let layout = alloc::Layout::from_size_align_unchecked(size, align);
-        alloc::dealloc(ptr, layout);
-    }
     extern crate alloc as alloc_crate;
-    pub use alloc_crate::alloc;
 }
 /// Generates `#[unsafe(no_mangle)]` functions to export the specified type as
 /// the root implementation of all generated traits.
@@ -442,21 +833,25 @@ macro_rules! __export_workflow_impl {
 pub(crate) use __export_workflow_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.3.0:workflow:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.4.0:workflow:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 411] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9c\x02\x01A\x02\x01\
-A\x08\x01B\x0f\x01j\x01s\x01s\x01@\x01\x03urls\0\0\x04\0\x08http-get\x01\x01\x01\
-@\x01\x02msw\x01\0\x04\0\x08sleep-ms\x01\x02\x01@\0\0w\x04\0\x06now-ms\x01\x03\x04\
-\0\x0arandom-u64\x01\x03\x01@\x01\x04names\0s\x04\0\x0bawait-event\x01\x04\x01p}\
-\x01@\x01\x05state\x05\x01\0\x04\0\x0acheckpoint\x01\x06\x01@\x01\x03msgs\x01\0\x04\
-\0\x03log\x01\x07\x03\0\x1ckeel:workflow/host-api@0.3.0\x05\0\x01j\x01s\x01s\x01\
-@\x01\x05inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\x03\0\x01\x04\
-\0\x06resume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.3.0\x04\0\x0b\x0e\x01\0\x08\
-workflow\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.2\
-27.1\x10wit-bindgen-rust\x060.41.0";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 588] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xcd\x03\x01A\x02\x01\
+A\x08\x01B\x1b\x01o\x02ss\x01p\0\x01r\x03\x06status{\x07headers\x01\x04bodys\x04\
+\0\x0dhttp-response\x03\0\x02\x01ks\x01j\x01\x03\x01s\x01@\x05\x06methods\x03url\
+s\x07headers\x01\x04body\x04\x0eretry-attemptsy\0\x05\x04\0\x0chttp-request\x01\x06\
+\x01j\x01s\x01s\x01@\x01\x03urls\0\x07\x04\0\x08http-get\x01\x08\x01@\x01\x02msw\
+\x01\0\x04\0\x08sleep-ms\x01\x09\x01@\0\0w\x04\0\x06now-ms\x01\x0a\x04\0\x0arand\
+om-u64\x01\x0a\x01@\x01\x04names\0s\x04\0\x0bawait-event\x01\x0b\x01p}\x01@\x01\x05\
+state\x0c\x01\0\x04\0\x0acheckpoint\x01\x0d\x01@\x02\x03keys\x05values\x01\0\x04\
+\0\x06kv-set\x01\x0e\x01@\x01\x03keys\0\x04\x04\0\x06kv-get\x01\x0f\x01@\x01\x03\
+msgs\x01\0\x04\0\x03log\x01\x10\x03\0\x1ckeel:workflow/host-api@0.4.0\x05\0\x01j\
+\x01s\x01s\x01@\x01\x05inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\
+\x03\0\x01\x04\0\x06resume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.4.0\x04\0\x0b\
+\x0e\x01\0\x08workflow\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-co\
+mponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

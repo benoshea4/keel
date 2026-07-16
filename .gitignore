@@ -6,3 +6,9 @@ engine.log
 .DS_Store
 # accept_phase3.sh copies the two counter artifacts here
 guests/counter/counter-v?.wasm
+# fleet supervisor artifacts (smoke_fleet.sh / local fleets)
+keel-*.log
+fleet.log
+fleet-smoke.toml
+# smoke_dr.sh snapshot directory
+smoke-dr-backups/

@@ -136,7 +136,7 @@ pub async fn create_workflow(
     let id = uuid::Uuid::new_v4().to_string();
     // Input is stored as an opaque JSON string; the engine never inspects it.
     db::create_workflow(&conn, &id, &module_hash, &input_json).map_err(internal)?;
-    runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 1 of 3 (§0)
+    runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 1 of 4 (§0)
     Ok(Json(json!({ "id": id })))
 }
 
@@ -351,7 +351,7 @@ pub async fn upgrade_workflow(
         db::upgrade_module_txn(&mut conn, &id, snap.journal_seq, &new_hash).map_err(internal)?;
         snap.journal_seq
     };
-    runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 3 of 3 (§0)
+    runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 3 of 4 (§0)
     Ok(Json(
         json!({ "id": id, "module_hash": new_hash, "resumed_from_seq": c_seq }),
     ))
@@ -406,6 +406,135 @@ pub async fn cancel_workflow(
     Ok(Json(
         json!({ "id": id, "status": "failed", "output": "cancelled by operator" }),
     ))
+}
+
+/// GET /api/workflows?status=&limit=&offset= — v1.3 paged listing, newest
+/// first. Returns row metadata (not input/output blobs — fetch a workflow by
+/// id for those). limit caps at 500.
+pub async fn list_workflows(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiErr> {
+    let status = q.get("status").map(String::as_str);
+    if let Some(s) = status {
+        const KNOWN: [&str; 5] = ["running", "sleeping", "waiting_event", "completed", "failed"];
+        if !KNOWN.contains(&s) {
+            return Err(bad(format!("unknown status '{s}' — one of {KNOWN:?}")));
+        }
+    }
+    let limit: i64 = q
+        .get("limit")
+        .map(|v| v.parse())
+        .transpose()
+        .map_err(bad)?
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let offset: i64 = q
+        .get("offset")
+        .map(|v| v.parse())
+        .transpose()
+        .map_err(bad)?
+        .unwrap_or(0)
+        .max(0);
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let rows = db::list_workflows_page(&conn, status, limit, offset).map_err(internal)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|w| {
+            json!({
+                "id": w.id,
+                "status": w.status,
+                "module_hash": w.module_hash,
+                "created_at": w.created_at,
+                "updated_at": w.updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
+}
+
+/// POST /api/schedules — v1.2: {"module_hash","input","interval_ms"} → a new
+/// workflow every interval (first fire one interval from now; a schedule that
+/// missed windows while the engine was down fires ONCE, not once per miss).
+/// Floor 1000ms so a typo can't peg the engine.
+pub async fn create_schedule(
+    State(shared): State<Arc<EngineShared>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiErr> {
+    let hash = body
+        .get("module_hash")
+        .and_then(Value::as_str)
+        .ok_or((StatusCode::BAD_REQUEST, "missing module_hash".to_string()))?;
+    let input = body
+        .get("input")
+        .ok_or((StatusCode::BAD_REQUEST, "missing input".to_string()))?;
+    let interval_ms = body
+        .get("interval_ms")
+        .and_then(Value::as_i64)
+        .ok_or((StatusCode::BAD_REQUEST, "missing interval_ms (integer)".to_string()))?;
+    if interval_ms < 1000 {
+        return Err(bad("interval_ms must be >= 1000"));
+    }
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if !db::module_exists(&conn, hash).map_err(internal)? {
+        return Err((StatusCode::NOT_FOUND, "unknown module hash".to_string()));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let first = crate::journal::now_ms() + interval_ms;
+    db::insert_schedule(&conn, &id, hash, &input.to_string(), interval_ms, first)
+        .map_err(internal)?;
+    Ok(Json(json!({ "id": id, "next_run_at": first })))
+}
+
+/// GET /api/schedules
+pub async fn list_schedules(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Json<Value>, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let rows = db::list_schedules(&conn).map_err(internal)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "module_hash": s.module_hash,
+                "input": s.input,
+                "interval_ms": s.interval_ms,
+                "next_run_at": s.next_run_at,
+                "enabled": s.enabled,
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
+}
+
+/// DELETE /api/schedules/{id} → 204. Already-created workflows are untouched.
+pub async fn delete_schedule(
+    State(shared): State<Arc<EngineShared>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::delete_schedule(&conn, &id).map_err(internal)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "unknown schedule id".to_string()))
+    }
+}
+
+/// GET /metrics — v1.3: Prometheus text format, hand-rolled (no deps). Behind
+/// the same auth as everything else; scrapers send the bearer token.
+pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let counts = db::status_counts(&conn).map_err(internal)?;
+    let mut out = String::from(
+        "# HELP keel_workflows Workflows by status.\n# TYPE keel_workflows gauge\n",
+    );
+    for (status, n) in counts {
+        out.push_str(&format!("keel_workflows{{status=\"{status}\"}} {n}\n"));
+    }
+    out.push_str("# HELP keel_worker_threads Live workflow worker threads.\n# TYPE keel_worker_threads gauge\n");
+    out.push_str(&format!("keel_worker_threads {}\n", shared.thread_count()));
+    Ok(out)
 }
 
 /// GET /api/workflows/{id}

@@ -16,7 +16,7 @@ wasmtime = { version = "43", features = ["component-model"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 axum = { version = "0.8", features = ["multipart"] }   # multipart needed for the
                                                         # phase-2 module upload form
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }  # backup: v2 DR (online snapshots)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -28,3 +28,4 @@ clap = { version = "4", features = ["derive", "env"] }   # env: KEEL_API_TOKEN (
 askama = "0.12"          # phase 2 (templates); unused until Task 2.8
 tracing = "0.1"
 tracing-subscriber = "0.3"
+toml = "0.8"             # v2 fleet: tenants config file
