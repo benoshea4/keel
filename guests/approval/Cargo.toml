@@ -1,0 +1,25 @@
+# Phase 2 acceptance guest (SPEC.md Task 2.9).
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+# (NOT plain cargo, and NOT the default wasip1 target — wasm32-unknown-unknown is
+# what guarantees the guest has zero ambient capabilities; SPEC.md §0 rule 4.
+# A guest built for wasip1 fails instantiation with unresolved `wasi:*` imports.)
+
+[package]
+name = "approval"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:approval"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"
