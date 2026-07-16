@@ -16,6 +16,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use wasmtime::component::bindgen;
 
 use crate::db;
@@ -45,6 +46,30 @@ pub struct Ctx {
     /// v1.1 — per-store resource caps (linear memory). runner.rs builds it and
     /// registers it via store.limiter().
     pub limits: wasmtime::StoreLimits,
+    /// v2.1 — --secrets-file path. Re-read on EVERY secret() call (rotation
+    /// must be visible; secret reads are rare). None = no file configured.
+    pub secrets_path: Option<String>,
+    /// v2.1 — (name, value) of every secret THIS execution has read, in read
+    /// order. The redaction set for journaled http requests: deterministic
+    /// across replay because secret() traps on any value change. Never
+    /// persisted anywhere.
+    pub read_secrets: Vec<(String, String)>,
+}
+
+impl Ctx {
+    /// v2.1 — add a successfully-read secret to this execution's redaction
+    /// set. Every DISTINCT (name, value) pair is kept: a secret rotated
+    /// between two reads (legal while no replay crosses the rotation) means
+    /// two live values in play, and a request built with EITHER must redact.
+    fn remember_secret(&mut self, name: &str, value: &str) {
+        if !self
+            .read_secrets
+            .iter()
+            .any(|(n, v)| n == name && v == value)
+        {
+            self.read_secrets.push((name.to_string(), value.to_string()));
+        }
+    }
 }
 
 /// Sentinel error a worker thread bails with when the notifier's abort flag is
@@ -96,6 +121,9 @@ impl keel::workflow::host_api::Host for Ctx {
 
         let agent = self.http.clone(); // Agent is Arc-backed: cheap clone keeps the
         let u = url.clone();           // closure from borrowing self while j is &mut
+        // v2.1 — the journaled request is REDACTED (secret values → placeholder);
+        // the closure uses the real url. See http_request for the full story.
+        let url = redact(&url, &self.read_secrets);
         let r = self.j.journaled("http-get", &Req { url }, move || {
             Ok(match do_http_get(&agent, &u) {
                 Ok(body) => Resp::Ok { ok: body },
@@ -115,6 +143,7 @@ impl keel::workflow::host_api::Host for Ctx {
         headers: Vec<(String, String)>,
         body: Option<String>,
         retry_attempts: u32,
+        timeout_ms: u32,
     ) -> wasmtime::Result<Result<keel::workflow::host_api::HttpResponse, String>> {
         // v1.2 — the general HTTP call. Everything that could vary is part of
         // the journaled request, so replay verifies the guest still asks for
@@ -122,6 +151,14 @@ impl keel::workflow::host_api::Host for Ctx {
         // only transport failures are Err. Retries are strictly opt-in
         // (retry_attempts extra tries on transport/5xx) because auto-retrying
         // a POST is a caller decision, not the engine's.
+        //
+        // v2.1 — the JOURNALED request is redacted: any value the guest
+        // obtained via secret() is replaced by {{secret:name}} before the row
+        // is written or compared, while the wire request uses the real bytes.
+        // This is what makes secret() mean anything — the only use of a
+        // secret is to put it in a request, and the request is journaled.
+        // Replay-stable because secret() guarantees (by hash check) that the
+        // redaction set carries identical values on replay, or traps first.
         #[derive(Serialize)]
         struct Req {
             method: String,
@@ -129,6 +166,7 @@ impl keel::workflow::host_api::Host for Ctx {
             headers: Vec<(String, String)>,
             body: Option<String>,
             retry_attempts: u32,
+            timeout_ms: u32,
         }
         #[derive(Serialize, Deserialize)]
         #[serde(untagged)]
@@ -144,30 +182,39 @@ impl keel::workflow::host_api::Host for Ctx {
         }
 
         let agent = self.http.clone();
+        let rs = &self.read_secrets;
         let req = Req {
-            method,
-            url,
-            headers,
-            body,
+            method: method.clone(),
+            url: redact(&url, rs),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.clone(), redact(v, rs)))
+                .collect(),
+            body: body.as_deref().map(|b| redact(b, rs)),
             retry_attempts,
+            timeout_ms,
         };
-        let (m, u, h, b) = (
-            req.method.clone(),
-            req.url.clone(),
-            req.headers.clone(),
-            req.body.clone(),
-        );
         let r = self
             .j
             .journaled("http-request", &req, move || {
-                Ok(match do_http_request(&agent, &m, &u, &h, b.as_deref(), retry_attempts) {
-                    Ok((status, headers, body)) => Resp::Ok {
-                        status,
-                        headers,
-                        body,
+                Ok(
+                    match do_http_request(
+                        &agent,
+                        &method,
+                        &url,
+                        &headers,
+                        body.as_deref(),
+                        retry_attempts,
+                        timeout_ms,
+                    ) {
+                        Ok((status, headers, body)) => Resp::Ok {
+                            status,
+                            headers,
+                            body,
+                        },
+                        Err(e) => Resp::Err { err: e },
                     },
-                    Err(e) => Resp::Err { err: e },
-                })
+                )
             })
             .map_err(trap)?;
         Ok(match r {
@@ -246,6 +293,93 @@ impl keel::workflow::host_api::Host for Ctx {
             return Ok(r.v);
         }
         db::kv_get_and_journal(&mut self.j.db, &id, seq, &key, &req_json).map_err(trap)
+    }
+
+    fn secret(&mut self, name: String) -> wasmtime::Result<Result<String, String>> {
+        // v2.1 — the one host call whose RESULT must never be journaled.
+        // Hand-rolled: the journal records {"name"} → {"salt", "sha256"} (or
+        // the guest-visible {"err"}), and replay re-reads the LIVE secrets
+        // file and verifies the salted hash. Same value → return the live bytes (the
+        // guest can't tell replay from first run). Different value → trap
+        // LOUDLY: the workflow's journaled requests were built with the old
+        // value, so silently substituting the new one would diverge replay in
+        // ways no one can debug. The operator restores the old value or
+        // cancels the workflow. Rotation is safe once the workflow completes,
+        // or for workflows that have not read the secret yet.
+        #[derive(Serialize)]
+        struct Req {
+            name: String,
+        }
+        let seq = self.j.next_seq;
+        self.j.next_seq += 1;
+        let id = self.j.workflow_id.clone();
+        let req_json =
+            serde_json::to_string(&Req { name: name.clone() }).map_err(|e| trap(e.into()))?;
+
+        let live = lookup_secret(self.secrets_path.as_deref(), &name);
+
+        if let Some((rkind, rreq, rresp)) =
+            db::get_journal_row(&self.j.db, &id, seq).map_err(trap)?
+        {
+            if rkind != "secret" || rreq != req_json {
+                return Err(trap(anyhow::anyhow!(
+                    "nondeterministic replay at seq {seq}: recorded ({rkind}, {rreq}) \
+                     but live code produced (secret, {req_json})."
+                )));
+            }
+            let v: serde_json::Value = serde_json::from_str(&rresp)
+                .map_err(|e| trap(anyhow::Error::new(e).context("corrupt journal response")))?;
+            if let Some(err) = v.get("err").and_then(|e| e.as_str()) {
+                // The original read failed; replay returns the same failure.
+                return Ok(Err(err.to_string()));
+            }
+            let want = v
+                .get("sha256")
+                .and_then(|h| h.as_str())
+                .ok_or_else(|| trap(anyhow::anyhow!("corrupt journal response for secret")))?;
+            let salt = v
+                .get("salt")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| trap(anyhow::anyhow!("corrupt journal response for secret")))?;
+            return match live {
+                Ok(val) if salted_sha256(salt, &val) == want => {
+                    self.remember_secret(&name, &val);
+                    Ok(Ok(val))
+                }
+                Ok(_) => Err(trap(anyhow::anyhow!(
+                    "secret '{name}' changed mid-workflow: the live value no longer matches \
+                     the hash journaled at seq {seq}. Restore the previous value in the \
+                     secrets file, or cancel this workflow — resuming with a different \
+                     secret would silently diverge from the journal."
+                ))),
+                Err(e) => Err(trap(anyhow::anyhow!(
+                    "secret '{name}' was readable when journaled at seq {seq} but is now \
+                     unavailable ({e}). Restore it, or cancel this workflow."
+                ))),
+            };
+        }
+
+        // Live path: journal name→salted hash (never the value), THEN return
+        // the value. Salted so the journal (which travels into every backup)
+        // is not an offline rainbow-table oracle for guessable secrets.
+        match live {
+            Ok(val) => {
+                let salt = hex::encode(uuid::Uuid::new_v4().as_bytes());
+                let h = salted_sha256(&salt, &val);
+                let resp = format!("{{\"salt\":\"{salt}\",\"sha256\":\"{h}\"}}");
+                db::insert_journal_row(&self.j.db, &id, seq, "secret", &req_json, &resp)
+                    .map_err(trap)?;
+                self.remember_secret(&name, &val);
+                Ok(Ok(val))
+            }
+            Err(e) => {
+                let resp = serde_json::to_string(&serde_json::json!({ "err": e }))
+                    .map_err(|er| trap(er.into()))?;
+                db::insert_journal_row(&self.j.db, &id, seq, "secret", &req_json, &resp)
+                    .map_err(trap)?;
+                Ok(Err(e))
+            }
+        }
     }
 
     fn sleep_ms(&mut self, ms: u64) -> wasmtime::Result<()> {
@@ -452,6 +586,7 @@ fn do_http_request(
     headers: &[(String, String)],
     body: Option<&str>,
     retry_attempts: u32,
+    timeout_ms: u32,
 ) -> Result<HttpOut, String> {
     const BACKOFF_MS: [u64; 3] = [500, 1000, 2000];
     // Cap: a guest asking for u32::MAX retries would pin its worker inside one
@@ -462,6 +597,10 @@ fn do_http_request(
     let mut last_err = String::new();
     for attempt in 0..tries {
         let mut req = agent.request(method, url);
+        // v2.1 — per-attempt timeout; 0 = the Agent default (30s, runner.rs).
+        if timeout_ms > 0 {
+            req = req.timeout(std::time::Duration::from_millis(timeout_ms as u64));
+        }
         for (k, v) in headers {
             req = req.set(k, v);
         }
@@ -513,6 +652,84 @@ fn read_response(resp: ureq::Response) -> Result<HttpOut, String> {
     Ok((status, headers, String::from_utf8_lossy(&buf).into_owned()))
 }
 
+// --- Secrets (v2.1) ---------------------------------------------------------
+
+/// hex(sha256(salt-hex ‖ value)) — what the journal stores instead of a
+/// secret. The salt (fresh per journal row) keeps a stolen journal/backup
+/// from being an offline dictionary oracle for guessable secrets.
+fn salted_sha256(salt: &str, value: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(salt.as_bytes());
+    h.update(value.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// KEY=VALUE lines; blank lines and #-comments skipped; keys trimmed, values
+/// taken VERBATIM after the first '=' (a secret may contain '=' or spaces).
+/// A non-blank, non-comment line without '=' is an error, and so is a
+/// duplicate key — silently skipping a typo or shadowing a value would turn
+/// into a lying "secret not found" / wrong-secret later.
+fn parse_secrets(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        match line.split_once('=') {
+            Some((k, v)) => {
+                let k = k.trim();
+                if out.iter().any(|(n, _)| n == k) {
+                    return Err(format!("secrets file line {}: duplicate key '{k}'", i + 1));
+                }
+                out.push((k.to_string(), v.to_string()));
+            }
+            None => return Err(format!("secrets file line {}: no '=' separator", i + 1)),
+        }
+    }
+    Ok(out)
+}
+
+/// Read + parse a secrets file. pub: main.rs validates the file at startup
+/// (fail fast on a config error) with the same code the host call uses.
+pub fn load_secrets(path: &str) -> Result<Vec<(String, String)>, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("secrets file {path}: {e}"))?;
+    parse_secrets(&text)
+}
+
+/// The live half of the secret host call. Errors here are guest-visible DATA
+/// (journaled as {"err"}), not traps — a missing secret is the workflow's
+/// problem to handle, like a 404.
+fn lookup_secret(path: Option<&str>, name: &str) -> Result<String, String> {
+    let path = path.ok_or_else(|| "no --secrets-file configured on this engine".to_string())?;
+    load_secrets(path)?
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+        .ok_or_else(|| format!("secret '{name}' not found in secrets file"))
+}
+
+/// Replace every read-secret VALUE occurring in `s` with {{secret:name}} —
+/// applied to journaled request fields only, never to what goes on the wire.
+/// Longest value first so a secret containing another is replaced whole;
+/// empty values never match (they would "occur" everywhere).
+fn redact(s: &str, secrets: &[(String, String)]) -> String {
+    if secrets.is_empty() {
+        return s.to_string();
+    }
+    let mut by_len: Vec<&(String, String)> =
+        secrets.iter().filter(|(_, v)| !v.is_empty()).collect();
+    by_len.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    let mut out = s.to_string();
+    for (name, val) in by_len {
+        if out.contains(val.as_str()) {
+            out = out.replace(val.as_str(), &format!("{{{{secret:{name}}}}}"));
+        }
+    }
+    out
+}
+
 fn do_http_get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
     // Backoff schedule per SPEC.md Task 2.6. With 3 attempts only the first two
     // gaps are reachable; the 2s slot is the schedule's next step if attempts are
@@ -539,4 +756,65 @@ fn do_http_get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
         }
     }
     Err(last_err)
+}
+
+// --- Unit tests (v2.1) -------------------------------------------------------
+// The secrets pure functions: parsing (strict) and redaction (the property the
+// whole feature hangs on — secret bytes never reach a journaled request).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_secrets_skips_blanks_and_comments_keeps_values_verbatim() {
+        let s = parse_secrets("# comment\n\nAPI_KEY=sk-live-123\nPW = p=a ss \n").unwrap();
+        assert_eq!(
+            s,
+            vec![
+                ("API_KEY".to_string(), "sk-live-123".to_string()),
+                ("PW".to_string(), " p=a ss ".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_secrets_rejects_lines_without_equals() {
+        let err = parse_secrets("GOOD=1\nnot a secret line\n").unwrap_err();
+        assert!(err.contains("line 2"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_secrets_rejects_duplicate_keys() {
+        let err = parse_secrets("A=1\nB=2\nA=3\n").unwrap_err();
+        assert!(err.contains("duplicate key 'A'") && err.contains("line 3"), "got: {err}");
+    }
+
+    #[test]
+    fn salted_hash_is_deterministic_and_salt_sensitive() {
+        assert_eq!(salted_sha256("aa", "v"), salted_sha256("aa", "v"));
+        assert_ne!(salted_sha256("aa", "v"), salted_sha256("bb", "v"));
+        assert_ne!(salted_sha256("aa", "v"), salted_sha256("aa", "w"));
+    }
+
+    #[test]
+    fn redact_replaces_values_with_named_placeholders() {
+        let secrets = vec![("tok".to_string(), "sk-live-123".to_string())];
+        assert_eq!(
+            redact("Bearer sk-live-123", &secrets),
+            "Bearer {{secret:tok}}"
+        );
+        assert_eq!(redact("no secrets here", &secrets), "no secrets here");
+    }
+
+    #[test]
+    fn redact_longest_value_first_and_ignores_empty() {
+        let secrets = vec![
+            ("short".to_string(), "abc".to_string()),
+            ("long".to_string(), "abcdef".to_string()),
+            ("empty".to_string(), String::new()),
+        ];
+        // The longer secret wins where they overlap; the empty one never fires.
+        assert_eq!(redact("xx abcdef yy abc", &secrets), "xx {{secret:long}} yy {{secret:short}}");
+    }
 }

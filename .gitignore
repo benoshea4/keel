@@ -12,3 +12,5 @@ fleet.log
 fleet-smoke.toml
 # smoke_dr.sh snapshot directory
 smoke-dr-backups/
+# smoke_secrets.sh secrets fixture (never commit secret material)
+smoke-secrets.env

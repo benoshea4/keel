@@ -35,9 +35,10 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_phase3.sh                          # must print PHASE 3 PASS
 ./scripts/smoke_cancel.sh                           # must print CANCEL SMOKE PASS
 ./scripts/smoke_auth.sh                             # must print AUTH+LIMITS SMOKE PASS
-./scripts/smoke_effects.sh                          # must print EFFECTS SMOKE PASS (v1.2/v1.3)
+./scripts/smoke_effects.sh                          # must print EFFECTS SMOKE PASS (v1.2/v1.3 + v2.1 cron/timeout)
 ./scripts/smoke_dr.sh                               # must print DR SMOKE PASS (backup/restore)
 ./scripts/smoke_fleet.sh                            # must print FLEET SMOKE PASS (cell tenancy)
+./scripts/smoke_secrets.sh                          # must print SECRETS SMOKE PASS (v2.1)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -251,6 +252,44 @@ G. *(v1.2/v1.3/v2 slice, 2026-07-16 — "build out the full roadmap")* One pass,
    - **KV caveat** (documented in docs/guests.md, roadmapped v2.3): upgrade
      tail-discard does not roll back kv writes from the discarded tail.
    - **Docs**: ROADMAP.md + docs/{operations,api,guests}.md.
+
+H. *(v2.1, 2026-07-16 — secrets / cron / timeout, WIT 0.5.0)*
+   - **`secret(name)`** (engine/src/host.rs, hand-rolled journaling): journal
+     row = `{"name"}` → `{"salt","sha256"}` — the VALUE never touches SQLite.
+     Replay re-reads the live `--secrets-file` and verifies the salted hash;
+     a mismatch traps with "changed mid-workflow" (workflow → failed, the
+     operator restores the value or cancels). An error result (`{"err"}`) is
+     journaled and replays as the same error. Read values are REDACTED from
+     journaled http-request/http-get requests (`{{secret:name}}` placeholder;
+     wire carries real bytes) via `Ctx.read_secrets` — every distinct
+     (name, value) pair read this execution, which is replay-deterministic
+     because secret() hash-checks first. Redaction CANNOT cover checkpoint
+     state, kv values, event payloads, or response bodies — documented sharp
+     edge in docs/guests.md. Secrets file: KEY=VALUE, strict parse (no
+     '='-less lines, no duplicate keys), validated at startup (fail fast),
+     0600 warning, re-read on every call so rotation is live.
+   - **Cron schedules** (engine/src/cron.rs): hand-rolled 6-field parser
+     (sec min hour dom mon dow; UTC; vixie dom/dow-OR; bitmask sets +
+     Hinnant civil_from_days — no chrono). `cron::next_run` is the ONE
+     "when next" decision for both kinds; `db::fire_schedule` now takes the
+     caller-computed next_run_at inside the same single txn (advance_schedule
+     SQL is gone). A schedule whose expression can never fire again is
+     auto-disabled by the scheduler (not hot-looped). `PATCH
+     /api/schedules/{id}` {"enabled"} pauses/resumes. Schema: `schedules.cron`
+     TEXT NULL via `ensure_column` (the one sanctioned additive ALTER —
+     pre-v2.1 DBs retrofit at startup; unit-tested).
+   - **`timeout-ms` on http-request**: caps each ATTEMPT (0 = 30s agent
+     default); a timeout is a transport failure (retryable if opted in).
+   - Journal request JSON for http-request grew a `timeout_ms` field —
+     workflows in flight across the 0.4→0.5 engine upgrade were already
+     rebuild-gated by the WIT bump (blob-incompatible), same policy as v2.0.
+   - Gates: `smoke_secrets.sh` (placeholder in journal + real value on the
+     wire + replay across kill -9 + loud rotation failure + no raw bytes
+     anywhere in db files or engine.log), extended `smoke_effects.sh` (cron
+     fires ≥2 in 6s, PATCH pause holds, 400s for cron+interval both/junk
+     cron, `slow_timed_out` via stub /slow at 3s vs 300ms budget). 27 unit
+     tests (cron parser/next-fire, secrets parse/redact, fire_schedule txn,
+     ensure_column retrofit).
 
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant

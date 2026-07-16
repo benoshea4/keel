@@ -18,6 +18,7 @@ Flags that matter in production:
 | `--max-guest-memory-mb` | 256 | Per-workflow linear-memory cap. |
 | `--retain-terminal-hours` | 0 (keep forever) | GC completed/failed workflows (journal, events, snapshots, kv included) after this many hours. |
 | `--backup-dir` + `--backup-interval-secs` + `--backup-keep` | off / 300 / 24 | Periodic online snapshots (below). |
+| `--secrets-file` | unset | KEY=VALUE file backing the `secret` host call (below). |
 
 ## Exposing it
 
@@ -33,6 +34,34 @@ Flags that matter in production:
 
 API clients send `Authorization: Bearer <token>`; the UI logs in at `/login`
 (the cookie stores a digest, never the token; `/logout` clears it).
+
+## Secrets
+
+```bash
+install -m 600 /dev/null secrets.env
+echo 'stripe-key=sk_live_...' >> secrets.env
+keel serve --db keel.db --secrets-file secrets.env
+```
+
+Format: `KEY=VALUE` per line, `#` comments, keys trimmed, values verbatim
+after the first `=`. Duplicate keys and `=`-less lines fail startup (fail
+fast beats a wrong secret at 3am). The engine warns unless the file is
+mode 600.
+
+What guests see and what lands on disk: `secret(name)` returns the live
+value; the journal records only the name and a **salted sha256**; values a
+workflow has read are redacted (`{{secret:name}}`) from its journaled
+HTTP requests. The database and its backups never contain secret bytes —
+the secrets file is the one thing you must protect (and it deliberately
+does NOT ride along in `--backup-dir` snapshots: restore = db snapshot +
+your secrets file).
+
+**Rotation:** editing the file takes effect immediately for *new* reads.
+An in-flight workflow that already read the old value keeps working —
+UNLESS it crashes/restarts and replays the read, which then fails loudly
+("changed mid-workflow"): restore the old value, let the workflow finish,
+rotate again; or cancel the workflow. Never rotate-and-restart as one move
+unless failing those workflows is what you want.
 
 ## Backups and disaster recovery
 
@@ -79,7 +108,8 @@ port = 9101            # 127.0.0.1 port, unique
 db = "acme.db"
 api_token = "..."      # per-tenant root credential
 # optional per-tenant: max_running, max_guest_memory_mb,
-# retain_terminal_hours, backup_dir, backup_interval_secs, backup_keep
+# retain_terminal_hours, backup_dir, backup_interval_secs, backup_keep,
+# secrets_file (per-tenant secrets — cells never share one)
 
 [[tenants]]
 name = "globex"

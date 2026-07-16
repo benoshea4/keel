@@ -5,8 +5,11 @@
 // 0.4.0 (v1.2) added http-request, kv-get, kv-set — new imports only; guests
 // need a rebuild, their source is untouched. (0.x minors are still blob-
 // incompatible: components compiled against 0.3.0 will not instantiate.)
+// 0.5.0 (v2.1) added secret + a timeout-ms parameter on http-request. The
+// http-request signature change means guests that call it must add the new
+// argument (0 = engine default) when rebuilding.
 // Never edit an interface in place mid-phase.
-package keel:workflow@0.4.0;
+package keel:workflow@0.5.0;
 
 interface host-api {
     /// v1.2 — http-request's result. status is the raw code (2xx not special);
@@ -23,13 +26,26 @@ interface host-api {
     /// opts into retrying transport errors and 5xx — the caller decides,
     /// because auto-retrying a non-idempotent POST is not the engine's call.
     /// Response bodies are utf-8, truncated by the host to 1 MiB.
+    /// v2.1 — `timeout-ms` caps EACH attempt (0 = the engine default, 30s).
+    /// A timeout is a transport failure: `err` (and retried if opted in).
     http-request: func(
         method: string,
         url: string,
         headers: list<tuple<string, string>>,
         body: option<string>,
         retry-attempts: u32,
+        timeout-ms: u32,
     ) -> result<http-response, string>;
+
+    /// v2.1 — read a named secret from the engine's --secrets-file. The VALUE
+    /// never touches the journal or database: the journal records only the
+    /// name and a salted sha256, and replay re-reads the live file and
+    /// verifies the hash — a secret rotated mid-workflow fails replay loudly
+    /// (restore the old value or cancel the workflow) instead of silently
+    /// diverging. Values of secrets read this way are also redacted from
+    /// journaled http-request/http-get requests ({{secret:name}} placeholder).
+    /// `err` when no secrets file is configured or the name is absent.
+    secret: func(name: string) -> result<string, string>;
 
     /// Journaled HTTP GET. ok = response body (utf-8, truncated by host to 1 MiB),
     /// err = human-readable error string. Non-2xx status is an err.

@@ -62,6 +62,9 @@ pub struct EngineShared {
     /// v1.1 — per-guest linear-memory cap in bytes (--max-guest-memory-mb).
     /// Enforced via wasmtime StoreLimits; a guest that outgrows it fails.
     pub max_guest_memory: usize,
+    /// v2.1 — --secrets-file path for the secret host call. None = the call
+    /// errs (guest-visible) with "no secrets file configured".
+    pub secrets_path: Option<String>,
 }
 
 impl EngineShared {
@@ -70,6 +73,7 @@ impl EngineShared {
         max_running: u32,
         api_token: Option<String>,
         max_guest_memory: usize,
+        secrets_path: Option<String>,
     ) -> Result<Self> {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
@@ -104,6 +108,7 @@ impl EngineShared {
             upgrades: Mutex::new(std::collections::HashSet::new()),
             api_token,
             max_guest_memory,
+            secrets_path,
         })
     }
 
@@ -300,6 +305,8 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
         limits: wasmtime::StoreLimitsBuilder::new()
             .memory_size(shared.max_guest_memory)
             .build(),
+        secrets_path: shared.secrets_path.clone(),
+        read_secrets: Vec::new(),
     };
     let mut store = Store::new(&shared.engine, ctx);
     store.limiter(|c| &mut c.limits);

@@ -31,7 +31,8 @@ guest whose every effect replays.)
 
 | Call | Journaled | Semantics |
 |---|---|---|
-| `http-request(method, url, headers, body, retry-attempts)` | yes | The general HTTP call. Non-2xx is **data** (`http-response {status, headers, body}`); only transport failures are `err`. Retries are opt-in (transport + 5xx only, capped at 8 — loop with `sleep-ms` for more) — the engine won't re-POST for you. Body capped at 1 MiB, utf-8-lossy. |
+| `http-request(method, url, headers, body, retry-attempts, timeout-ms)` | yes | The general HTTP call. Non-2xx is **data** (`http-response {status, headers, body}`); only transport failures are `err`. Retries are opt-in (transport + 5xx only, capped at 8 — loop with `sleep-ms` for more) — the engine won't re-POST for you. `timeout-ms` caps **each attempt** (0 = 30s default); a timeout is a transport failure. Body capped at 1 MiB, utf-8-lossy. |
+| `secret(name)` | name + salted hash only | Reads the engine's `--secrets-file` live. The value NEVER touches the database: the journal gets `{name}` → `{salt, sha256}`, and replay re-verifies against the live file — a secret rotated under an in-flight replay **fails the workflow loudly** (restore the old value or cancel). Values you read are redacted (`{{secret:name}}`) from journaled `http-request`/`http-get` requests while the real bytes go on the wire. `err` if unconfigured/missing. |
 | `http-get(url)` | yes | Legacy simple GET: non-2xx is `err`, 3 automatic attempts. Prefer `http-request`. |
 | `sleep-ms(ms)` | yes | Durable: survives crashes with the original absolute deadline (remainder-sleep). |
 | `now-ms()` / `random-u64()` | yes | Wall clock / randomness, recorded so replay sees the same values. |
@@ -51,6 +52,12 @@ guest whose every effect replays.)
   in the common case; if you interleave kv writes and reads across a
   checkpoint boundary, checkpoint *after* the writes. (KV versioning is
   roadmapped — ROADMAP.md v2.3.)
+- **Secrets stay out of the journal only on the paths the engine controls.**
+  Redaction covers journaled `http-request`/`http-get` *requests*. It cannot
+  cover: `checkpoint` state (don't serialize secret values — re-read via
+  `secret()` after resume), `kv-set` values, event payloads you're sent, or a
+  *response body* in which the remote echoes your secret back. All of those
+  are stored verbatim by design. Use high-entropy secrets.
 - **1 MiB body cap is silent:** oversized HTTP responses arrive truncated with
   no marker. If you expect big payloads, check for your own terminator.
 - **Guests that spin forever** (`loop {}`) burn a core until someone calls

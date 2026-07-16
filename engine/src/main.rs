@@ -13,6 +13,7 @@
 
 mod api;
 mod auth;
+mod cron;
 mod db;
 mod fleet;
 mod host;
@@ -76,6 +77,11 @@ enum Cmd {
         /// v2 DR — how many snapshots to keep in --backup-dir (oldest pruned).
         #[arg(long, default_value_t = 24)]
         backup_keep: usize,
+        /// v2.1 — KEY=VALUE file backing the `secret` host call. Values never
+        /// touch the database (journal records name + sha256 only; replay
+        /// verifies against the live file). chmod 600 it.
+        #[arg(long)]
+        secrets_file: Option<String>,
     },
     /// One-shot consistent snapshot of a (possibly live) database, then exit.
     Backup {
@@ -111,6 +117,7 @@ async fn main() -> Result<()> {
             backup_dir,
             backup_interval_secs,
             backup_keep,
+            secrets_file,
         } => {
             serve(
                 db,
@@ -122,6 +129,7 @@ async fn main() -> Result<()> {
                 backup_dir,
                 backup_interval_secs,
                 backup_keep,
+                secrets_file,
             )
             .await
         }
@@ -146,6 +154,7 @@ async fn serve(
     backup_dir: Option<String>,
     backup_interval_secs: u64,
     backup_keep: usize,
+    secrets_file: Option<String>,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -160,11 +169,28 @@ async fn serve(
              127.0.0.1, do NOT expose this listener wider without a token"
         );
     }
+    // v2.1 — fail FAST on a bad secrets file: a missing/unparseable file is a
+    // config error at startup, not a per-workflow surprise at 3am.
+    if let Some(path) = &secrets_file {
+        host::load_secrets(path).map_err(|e| anyhow::anyhow!("--secrets-file: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    "secrets file {path} is group/world-readable (mode {:o}) — chmod 600 it",
+                    mode & 0o777
+                );
+            }
+        }
+    }
     let shared = Arc::new(runner::EngineShared::new(
         db_path.clone(),
         max_running,
         api_token,
         max_guest_memory_mb.max(1) * 1024 * 1024,
+        secrets_file,
     )?);
 
     // Task 1.4 — recovery scan. This IS the entire crash-recovery implementation:
@@ -190,10 +216,11 @@ async fn serve(
     }
     drop(conn); // startup connection is done; every thread opens its own
 
-    // v1.2 — the scheduler loop: every second, fire due interval schedules by
-    // creating a workflow (born 'running' BEFORE spawn — same crash-safe
-    // ordering as the API path) and advancing next_run_at past now. Missed
-    // windows (engine downtime) collapse into ONE firing, by advance's math.
+    // v1.2 — the scheduler loop: every second, fire due schedules by creating
+    // a workflow (born 'running' BEFORE spawn — same crash-safe ordering as
+    // the API path) and moving next_run_at forward. Missed windows (engine
+    // downtime) collapse into ONE firing: interval schedules by whole-interval
+    // math, cron schedules (v2.1) because "next" is computed from now.
     {
         let shared = shared.clone();
         std::thread::spawn(move || loop {
@@ -202,11 +229,24 @@ async fn serve(
                 let mut conn = db::open_conn(&shared.db_path)?;
                 let now = journal::now_ms();
                 for s in db::due_schedules(&conn, now)? {
+                    // One decision point for both kinds (cron.rs). None means
+                    // the schedule can never fire again (an impossible cron
+                    // date, or an expression this engine no longer parses) —
+                    // disable it rather than re-hit it every second forever.
+                    let Some(next) = cron::next_run(s.cron.as_deref(), s.interval_ms, s.next_run_at, now)
+                    else {
+                        tracing::error!(
+                            "schedule {} has no next fire time (cron: {:?}) — disabling it",
+                            s.id, s.cron
+                        );
+                        db::set_schedule_enabled(&conn, &s.id, false)?;
+                        continue;
+                    };
                     let id = uuid::Uuid::new_v4().to_string();
                     // One txn: workflow row + advanced next_run_at — a crash
                     // can't double-fire a window (the row is the intent record;
                     // recovery starts it if we die before spawn).
-                    db::fire_schedule(&mut conn, &s, &id, now)?;
+                    db::fire_schedule(&mut conn, &s, &id, next)?;
                     tracing::info!("schedule {} fired: workflow {id}", s.id);
                     runner::spawn(shared.clone(), id); // sanctioned spawn call-site 4 of 4
                 }
@@ -292,7 +332,7 @@ async fn serve(
         )
         .route(
             "/api/schedules/{id}",
-            axum::routing::delete(api::delete_schedule),
+            axum::routing::delete(api::delete_schedule).patch(api::patch_schedule),
         )
         .route("/metrics", get(api::metrics))
         // NOTE: axum 0.8 path-param syntax is {id}. The spec's route table shows the

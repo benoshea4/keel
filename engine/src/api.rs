@@ -457,6 +457,9 @@ pub async fn list_workflows(
 /// workflow every interval (first fire one interval from now; a schedule that
 /// missed windows while the engine was down fires ONCE, not once per miss).
 /// Floor 1000ms so a typo can't peg the engine.
+/// v2.1: {"cron": "sec min hour dom mon dow"} (UTC, 6 fields) instead of
+/// interval_ms — exactly one of the two, validated here so a bad expression
+/// fails the request, not the scheduler thread.
 pub async fn create_schedule(
     State(shared): State<Arc<EngineShared>>,
     Json(body): Json<Value>,
@@ -468,22 +471,58 @@ pub async fn create_schedule(
     let input = body
         .get("input")
         .ok_or((StatusCode::BAD_REQUEST, "missing input".to_string()))?;
-    let interval_ms = body
-        .get("interval_ms")
-        .and_then(Value::as_i64)
-        .ok_or((StatusCode::BAD_REQUEST, "missing interval_ms (integer)".to_string()))?;
-    if interval_ms < 1000 {
-        return Err(bad("interval_ms must be >= 1000"));
-    }
+    let interval_ms = body.get("interval_ms").and_then(Value::as_i64);
+    let cron_expr = body.get("cron").and_then(Value::as_str);
+
+    let (interval_ms, first) = match (interval_ms, cron_expr) {
+        (Some(_), Some(_)) => {
+            return Err(bad("give interval_ms OR cron, not both"));
+        }
+        (None, None) => {
+            return Err(bad("missing interval_ms (integer) or cron (6-field string)"));
+        }
+        (Some(ms), None) => {
+            if ms < 1000 {
+                return Err(bad("interval_ms must be >= 1000"));
+            }
+            (ms, crate::journal::now_ms() + ms)
+        }
+        (None, Some(expr)) => {
+            let c = crate::cron::parse(expr).map_err(bad)?;
+            let first = c.next_after(crate::journal::now_ms()).ok_or_else(|| {
+                bad(format!("cron '{expr}' never matches a future time (impossible date?)"))
+            })?;
+            (0, first)
+        }
+    };
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     if !db::module_exists(&conn, hash).map_err(internal)? {
         return Err((StatusCode::NOT_FOUND, "unknown module hash".to_string()));
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let first = crate::journal::now_ms() + interval_ms;
-    db::insert_schedule(&conn, &id, hash, &input.to_string(), interval_ms, first)
+    db::insert_schedule(&conn, &id, hash, &input.to_string(), interval_ms, cron_expr, first)
         .map_err(internal)?;
     Ok(Json(json!({ "id": id, "next_run_at": first })))
+}
+
+/// PATCH /api/schedules/{id} — v2.1: {"enabled": true|false}. Pause/resume
+/// firing; a re-enabled interval schedule fires once for the paused gap (the
+/// collapse math), a cron schedule at its next expression match.
+pub async fn patch_schedule(
+    State(shared): State<Arc<EngineShared>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiErr> {
+    let enabled = body
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or((StatusCode::BAD_REQUEST, "missing enabled (boolean)".to_string()))?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::set_schedule_enabled(&conn, &id, enabled).map_err(internal)? {
+        Ok(Json(json!({ "id": id, "enabled": enabled })))
+    } else {
+        Err((StatusCode::NOT_FOUND, "unknown schedule id".to_string()))
+    }
 }
 
 /// GET /api/schedules
@@ -500,6 +539,7 @@ pub async fn list_schedules(
                 "module_hash": s.module_hash,
                 "input": s.input,
                 "interval_ms": s.interval_ms,
+                "cron": s.cron,
                 "next_run_at": s.next_run_at,
                 "enabled": s.enabled,
             })

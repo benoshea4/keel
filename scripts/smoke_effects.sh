@@ -3,10 +3,12 @@
 #
 # Proves:
 #   * http-request POSTs with headers/body, returns non-2xx as data (404);
+#   * v2.1 per-call timeout-ms: a 3s endpoint with a 300ms budget errs as data;
 #   * kv-set/kv-get are durable and journaled;
 #   * kill -9 mid-workflow REPLAYS the new calls instead of re-executing them
 #     (the stub's POST counter stays at 1 across the crash);
 #   * interval schedules fire repeatedly and stop when deleted;
+#   * v2.1 cron schedules fire by expression and PATCH enabled=false pauses;
 #   * GET /api/workflows paging filter, /metrics, and retention GC work.
 set -euo pipefail
 DB=smoke-effects.db; rm -f $DB $DB-shm $DB-wal
@@ -74,9 +76,10 @@ OUT=$(sqlite3 $DB "SELECT output FROM workflows WHERE id='$WF'")
 echo "$OUT" | grep -q '"echo_status":200'  || { echo "FAIL: echo_status missing — got $OUT"; exit 1; }
 echo "$OUT" | grep -q '"miss_status":404'  || { echo "FAIL: 404-as-data missing — got $OUT"; exit 1; }
 echo "$OUT" | grep -q 'hello keel'         || { echo "FAIL: echoed body missing — got $OUT"; exit 1; }
+echo "$OUT" | grep -q '"slow_timed_out":true' || { echo "FAIL: 300ms timeout did not fire — got $OUT"; exit 1; }
 echo "$OUT" | grep -q '"p1":true'          || { echo "FAIL: first kv-get wrong — got $OUT"; exit 1; }
 echo "$OUT" | grep -q '"phase":"two"'      || { echo "FAIL: post-crash kv-get wrong — got $OUT"; exit 1; }
-for want in "http-request 2" "kv-set 2" "kv-get 2" "sleep-ms 1"; do
+for want in "http-request 3" "kv-set 2" "kv-get 2" "sleep-ms 1"; do
   KIND=${want% *}; N=${want#* }
   GOT=$(sqlite3 $DB "SELECT COUNT(*) FROM journal WHERE workflow_id='$WF' AND kind='$KIND'")
   [ "$GOT" = "$N" ] || { echo "FAIL: expected $N $KIND rows, got $GOT"; exit 1; }
@@ -100,6 +103,37 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE localhost:8080/api/sched
 sleep 3
 N2=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE module_hash='$HC'")
 [ "$N2" -le $((N1 + 1)) ] || { echo "FAIL: schedule kept firing after delete ($N1 -> $N2)"; exit 1; }
+
+# 4b. v2.1 cron schedules: every-2s expression fires, PATCH pauses, bad input 400s
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/api/schedules \
+  -H 'content-type: application/json' \
+  -d "{\"module_hash\":\"$HC\",\"input\":{},\"interval_ms\":2000,\"cron\":\"* * * * * *\"}")
+[ "$CODE" = "400" ] || { echo "FAIL: interval_ms+cron together returned $CODE, want 400"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/api/schedules \
+  -H 'content-type: application/json' \
+  -d "{\"module_hash\":\"$HC\",\"input\":{},\"cron\":\"not a cron\"}")
+[ "$CODE" = "400" ] || { echo "FAIL: junk cron returned $CODE, want 400"; exit 1; }
+CRON=$(curl -s -X POST localhost:8080/api/schedules \
+  -H 'content-type: application/json' \
+  -d "{\"module_hash\":\"$HC\",\"input\":{\"target\":0},\"cron\":\"*/2 * * * * *\"}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s localhost:8080/api/schedules | grep -Fq '"cron":"*/2 * * * * *"' \
+  || { echo "FAIL: /api/schedules does not surface the cron field"; exit 1; }
+C0=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE module_hash='$HC'")
+sleep 6
+C1=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE module_hash='$HC'")
+[ $((C1 - C0)) -ge 2 ] || { echo "FAIL: cron fired $((C1 - C0)) times in 6s, want >= 2"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH localhost:8080/api/schedules/$CRON \
+  -H 'content-type: application/json' -d '{"enabled":false}')
+[ "$CODE" = "200" ] || { echo "FAIL: PATCH enabled=false returned $CODE"; exit 1; }
+sleep 3
+C2=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE module_hash='$HC'")
+[ "$C2" -le $((C1 + 1)) ] || { echo "FAIL: cron kept firing while disabled ($C1 -> $C2)"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH localhost:8080/api/schedules/no-such \
+  -H 'content-type: application/json' -d '{"enabled":true}')
+[ "$CODE" = "404" ] || { echo "FAIL: PATCH unknown schedule returned $CODE, want 404"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE localhost:8080/api/schedules/$CRON)
+[ "$CODE" = "204" ] || { echo "FAIL: cron schedule delete returned $CODE"; exit 1; }
 
 # 5. list API + metrics
 LC=$(curl -s "localhost:8080/api/workflows?status=completed&limit=2" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')

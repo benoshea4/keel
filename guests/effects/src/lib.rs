@@ -1,10 +1,11 @@
 // effects guest — v1.2 acceptance guest (see Cargo.toml header).
 //
 // Sequence: kv-set → POST /echo (headers+body) → GET a 404 (data, not error)
-// → kv-get → kv-set again → 8s durable sleep (the crash window) → kv-get.
-// After a kill -9 during the sleep, recovery must REPLAY the two http-requests
-// and four kv calls from the journal — the stub's POST counter staying at 1 is
-// the proof.
+// → GET /slow with a 300ms timeout (v2.1: must come back as a transport err
+// long before the stub's 3s response) → kv-get → kv-set again → 8s durable
+// sleep (the crash window) → kv-get. After a kill -9 during the sleep,
+// recovery must REPLAY the three http-requests and four kv calls from the
+// journal — the stub's POST counter staying at 1 is the proof.
 //
 // GUEST RULES (apply to every guest): no std::time, no std::thread::sleep, no
 // println!, no rand — use host::* instead (see guests/demo).
@@ -34,11 +35,16 @@ impl bindings::Guest for Component {
             &[("x-keel".to_string(), "yes".to_string())],
             Some("hello keel"),
             0,
+            0,
         )?;
         host::log(&format!("echo status {}", echo.status));
 
         // A 404 is a response, not an error — http-request hands it back.
-        let miss = host::http_request("GET", &format!("{base}/missing"), &[], None, 0)?;
+        let miss = host::http_request("GET", &format!("{base}/missing"), &[], None, 0, 0)?;
+
+        // v2.1 — per-call timeout: /slow answers after 3s, we allow 300ms.
+        // A timeout is a transport failure → Err, journaled as data.
+        let slow = host::http_request("GET", &format!("{base}/slow"), &[], None, 0, 300);
 
         let p1 = host::kv_get("phase").as_deref() == Some("one");
         host::kv_set("phase", "two");
@@ -50,6 +56,7 @@ impl bindings::Guest for Component {
             "echo_status": echo.status,
             "echo_body": echo.body,
             "miss_status": miss.status,
+            "slow_timed_out": slow.is_err(),
             "p1": p1,
             "phase": phase,
         })

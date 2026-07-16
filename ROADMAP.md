@@ -13,6 +13,7 @@ definition of done) and runs in CI.
 | v1.2 | Effects: `http-request` (method/headers/body, non-2xx as data, opt-in retries), journaled per-workflow KV (`kv-set`/`kv-get`), interval schedules (`/api/schedules`) — WIT 0.4.0 | `smoke_effects.sh` |
 | v1.3 | Operability: `GET /api/workflows` (paged, filtered), `/metrics` (Prometheus text), retention GC (`--retain-terminal-hours`), UI logout | `smoke_effects.sh` |
 | v2 (slice) | **DR**: periodic online snapshots (`--backup-dir`/`--backup-interval-secs`/`--backup-keep`) + one-shot `keel backup`, restore-by-copy runbook. **Cell tenancy**: `keel fleet --config` — one process/db/token per tenant, supervised, crash-only restarts | `smoke_dr.sh`, `smoke_fleet.sh` |
+| v2.1 | **Secrets**: `secret(name)` host call (WIT 0.5.0) — `--secrets-file`, journal stores name + salted sha256 only, replay verifies against the live file (rotation fails loudly), values redacted from journaled HTTP requests. **Cron schedules**: 6-field expressions (UTC, seconds resolution) + `PATCH /api/schedules/{id}` pause/resume. **Per-call `timeout-ms`** on http-request | `smoke_secrets.sh`, extended `smoke_effects.sh` |
 
 ## Answered design questions
 
@@ -31,28 +32,8 @@ definition of done) and runs in CI.
 
 ## Next
 
-Sequencing rationale: **secrets before platform work** — today a workflow
-calling an authenticated API must carry its token in the workflow input, which
-the journal stores in plaintext. That blocks real adoption more than any
-missing abstraction, so it goes first. One WIT bump per stage, never two.
-
-### v2.1 — real-workflow depth
-
-- **`secret(name)` host call** (WIT 0.5.0). Design, resolving the
-  journals-must-not-store-secrets tension: values come from `--secrets-file`
-  (KEY=VALUE, mode 0600), the call returns the live value, and the journal
-  records only `{name}` → `{sha256(value)}`. Replay re-reads the live file and
-  verifies the hash — a rotated secret fails replay *loudly* ("secret X
-  changed mid-workflow; restore it or cancel") instead of silently diverging.
-  Secret bytes never touch the database.
-  *Gate:* `smoke_secrets.sh` — secret in an `http-request` header against the
-  stub; kill -9 → replay works; rotate the file → replay fails with the
-  message.
-- **Cron expressions on schedules** — `cron` field (seconds-resolution parser)
-  as an alternative to `interval_ms`, same single-txn fire; plus
-  `PATCH /api/schedules/{id}` for enable/disable.
-  *Gate:* extend `smoke_effects.sh`.
-- **Per-call `timeout-ms` on http-request** — rides the same 0.5.0 bump.
+One WIT bump per stage, never two. (v2.1 shipped the secrets-first
+re-sequencing — see the table above.)
 
 ### v2.2 — platform
 

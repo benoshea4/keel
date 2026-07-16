@@ -19,7 +19,7 @@
 //   db = "acme.db"           # database path, unique
 //   api_token = "..."        # passed via env, never argv
 //   # optional: max_running, max_guest_memory_mb, retain_terminal_hours,
-//   #           backup_dir, backup_interval_secs, backup_keep
+//   #           backup_dir, backup_interval_secs, backup_keep, secrets_file
 
 use std::collections::HashSet;
 use std::process::{Child, Command, Stdio};
@@ -44,6 +44,7 @@ struct Tenant {
     backup_dir: Option<String>,
     backup_interval_secs: Option<u64>,
     backup_keep: Option<usize>,
+    secrets_file: Option<String>,
 }
 
 fn validate(cfg: &FleetConfig) -> Result<()> {
@@ -113,6 +114,9 @@ fn spawn_tenant(exe: &std::path::Path, t: &Tenant) -> Result<Child> {
     }
     if let Some(v) = t.backup_keep {
         cmd.arg("--backup-keep").arg(v.to_string());
+    }
+    if let Some(v) = &t.secrets_file {
+        cmd.arg("--secrets-file").arg(v);
     }
     let child = cmd
         .spawn()

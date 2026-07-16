@@ -25,12 +25,13 @@ urlencoded/multipart body shape.
 | `POST /api/workflows/{id}/upgrade` *(also form)* | `{"module_hash": "<new>"}` → move a **parked, checkpointed** workflow onto new code. Pre-flights the module (400 if it could never run), 409 if not parked / no checkpoint / operation already in flight. → `{id, module_hash, resumed_from_seq}`. |
 | `POST /api/workflows/{id}/cancel` | → 200, workflow becomes `failed` with output `cancelled by operator`. Works parked or spinning; 409 if terminal, mid-host-call (retry), or another operation holds the claim. |
 
-## Schedules (v1.2)
+## Schedules (v1.2, cron + pause v2.1)
 
 | Route | What |
 |---|---|
-| `POST /api/schedules` | `{"module_hash", "input", "interval_ms"}` (≥1000) → `{id, next_run_at}`. Fires a new workflow every interval, first fire one interval from now. Missed windows (downtime) collapse into one firing. |
-| `GET /api/schedules` | All schedules with next_run_at. |
+| `POST /api/schedules` | `{"module_hash", "input", "interval_ms"}` (≥1000) **or** `{"module_hash", "input", "cron"}` — exactly one of the two → `{id, next_run_at}`. `cron` is 6 fields, seconds first (`sec min hour dom mon dow`), UTC, vixie semantics (`*` `a-b` `a,b` `/step`; dom/dow OR when both restricted). Missed windows (downtime) collapse into one firing either way. Bad expressions 400 here, never in the scheduler. |
+| `GET /api/schedules` | All schedules with `cron`, `next_run_at`, `enabled`. |
+| `PATCH /api/schedules/{id}` | `{"enabled": true\|false}` → pause/resume firing. A re-enabled interval schedule fires once for the paused gap; a cron schedule waits for its next match. |
 | `DELETE /api/schedules/{id}` | → 204. Already-spawned workflows are untouched. |
 
 ## Operations

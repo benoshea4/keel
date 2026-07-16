@@ -117,15 +117,36 @@ CREATE TABLE IF NOT EXISTS schedules (
     id           TEXT PRIMARY KEY,          -- uuid v4
     module_hash  TEXT NOT NULL REFERENCES modules(hash),
     input        TEXT NOT NULL,             -- JSON handed to every spawned workflow
-    interval_ms  INTEGER NOT NULL,
+    interval_ms  INTEGER NOT NULL,          -- 0 when cron-driven (v2.1)
     next_run_at  INTEGER NOT NULL,          -- unix millis
     enabled      INTEGER NOT NULL DEFAULT 1,
-    created_at   INTEGER NOT NULL
+    created_at   INTEGER NOT NULL,
+    cron         TEXT                       -- v2.1: 6-field expr; NULL = interval
 );
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
     c.execute_batch(MIGRATION)?;
+    // v2.1 — the ONE sanctioned way an existing table evolves: an additive,
+    // nullable column, retrofitted onto pre-v2.1 databases here. (The header
+    // rule stands for everything else: append tables/indexes, never reshape.)
+    ensure_column(c, "schedules", "cron", "TEXT")?;
+    Ok(())
+}
+
+/// ALTER TABLE ... ADD COLUMN, only if the column is missing — CREATE TABLE IF
+/// NOT EXISTS won't touch tables that already exist, so additive columns need
+/// this second pass on databases created before the column landed.
+fn ensure_column(c: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+    let mut stmt = c.prepare(&format!("PRAGMA table_info({table})"))?;
+    let present = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|n| n == col);
+    if !present {
+        c.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])?;
+    }
     Ok(())
 }
 
@@ -499,6 +520,22 @@ pub struct ScheduleRow {
     pub interval_ms: i64,
     pub next_run_at: i64,
     pub enabled: bool,
+    /// v2.1 — 6-field cron expression; None = plain interval schedule.
+    pub cron: Option<String>,
+}
+
+const SCHEDULE_COLS: &str = "id, module_hash, input, interval_ms, next_run_at, enabled, cron";
+
+fn schedule_from_row(r: &rusqlite::Row) -> rusqlite::Result<ScheduleRow> {
+    Ok(ScheduleRow {
+        id: r.get(0)?,
+        module_hash: r.get(1)?,
+        input: r.get(2)?,
+        interval_ms: r.get(3)?,
+        next_run_at: r.get(4)?,
+        enabled: r.get::<_, i64>(5)? != 0,
+        cron: r.get(6)?,
+    })
 }
 
 pub fn insert_schedule(
@@ -507,32 +544,23 @@ pub fn insert_schedule(
     module_hash: &str,
     input_json: &str,
     interval_ms: i64,
+    cron: Option<&str>,
     first_run_at: i64,
 ) -> Result<()> {
     c.execute(
-        "INSERT INTO schedules (id, module_hash, input, interval_ms, next_run_at, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-        rusqlite::params![id, module_hash, input_json, interval_ms, first_run_at, now_ms()],
+        "INSERT INTO schedules (id, module_hash, input, interval_ms, next_run_at, enabled, created_at, cron)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+        rusqlite::params![id, module_hash, input_json, interval_ms, first_run_at, now_ms(), cron],
     )?;
     Ok(())
 }
 
 pub fn list_schedules(c: &Connection) -> Result<Vec<ScheduleRow>> {
-    let mut stmt = c.prepare(
-        "SELECT id, module_hash, input, interval_ms, next_run_at, enabled
-         FROM schedules ORDER BY created_at DESC",
-    )?;
+    let mut stmt = c.prepare(&format!(
+        "SELECT {SCHEDULE_COLS} FROM schedules ORDER BY created_at DESC"
+    ))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok(ScheduleRow {
-                id: r.get(0)?,
-                module_hash: r.get(1)?,
-                input: r.get(2)?,
-                interval_ms: r.get(3)?,
-                next_run_at: r.get(4)?,
-                enabled: r.get::<_, i64>(5)? != 0,
-            })
-        })?
+        .query_map([], schedule_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -541,53 +569,46 @@ pub fn delete_schedule(c: &Connection, id: &str) -> Result<bool> {
     Ok(c.execute("DELETE FROM schedules WHERE id = ?1", [id])? > 0)
 }
 
+/// v2.1 — PATCH /api/schedules/{id}: pause/resume firing. Returns false for an
+/// unknown id. Re-enabling leaves next_run_at alone: an interval schedule
+/// fires once for the paused gap (the collapse math), a cron schedule at its
+/// next expression match.
+pub fn set_schedule_enabled(c: &Connection, id: &str, enabled: bool) -> Result<bool> {
+    Ok(c.execute(
+        "UPDATE schedules SET enabled = ?2 WHERE id = ?1",
+        rusqlite::params![id, enabled as i64],
+    )? > 0)
+}
+
 /// Enabled schedules whose next_run_at has passed.
 pub fn due_schedules(c: &Connection, now: i64) -> Result<Vec<ScheduleRow>> {
-    let mut stmt = c.prepare(
-        "SELECT id, module_hash, input, interval_ms, next_run_at, enabled
-         FROM schedules WHERE enabled = 1 AND next_run_at <= ?1",
-    )?;
+    let mut stmt = c.prepare(&format!(
+        "SELECT {SCHEDULE_COLS} FROM schedules WHERE enabled = 1 AND next_run_at <= ?1"
+    ))?;
     let rows = stmt
-        .query_map([now], |r| {
-            Ok(ScheduleRow {
-                id: r.get(0)?,
-                module_hash: r.get(1)?,
-                input: r.get(2)?,
-                interval_ms: r.get(3)?,
-                next_run_at: r.get(4)?,
-                enabled: r.get::<_, i64>(5)? != 0,
-            })
-        })?
+        .query_map([now], schedule_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// Push next_run_at past `now` in whole intervals — a schedule that missed
-/// windows (engine was down) fires ONCE for the gap, not once per miss.
-pub fn advance_schedule(c: &Connection, id: &str, now: i64) -> Result<()> {
-    c.execute(
-        "UPDATE schedules
-         SET next_run_at = next_run_at
-             + ((MAX(?2 - next_run_at, 0) / interval_ms) + 1) * interval_ms
-         WHERE id = ?1",
-        rusqlite::params![id, now],
-    )?;
-    Ok(())
-}
-
-/// Fire one due schedule: create its workflow AND advance next_run_at in ONE
-/// transaction. The workflow row doubles as the intent record — a crash leaves
-/// either "not fired" (still due next pass) or "fired and advanced" (recovery
-/// starts the created workflow). A create→advance gap would double-fire.
+/// Fire one due schedule: create its workflow AND move next_run_at to
+/// `next_run_at` (computed by the caller — cron::next_run, one decision point
+/// for both kinds) in ONE transaction. The workflow row doubles as the intent
+/// record — a crash leaves either "not fired" (still due next pass) or "fired
+/// and advanced" (recovery starts the created workflow). A create→advance gap
+/// would double-fire.
 pub fn fire_schedule(
     c: &mut Connection,
     s: &ScheduleRow,
     workflow_id: &str,
-    now: i64,
+    next_run_at: i64,
 ) -> Result<()> {
     let tx = c.transaction()?;
     create_workflow(&tx, workflow_id, &s.module_hash, &s.input)?;
-    advance_schedule(&tx, &s.id, now)?;
+    tx.execute(
+        "UPDATE schedules SET next_run_at = ?2 WHERE id = ?1",
+        rusqlite::params![s.id, next_run_at],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -878,6 +899,50 @@ mod tests {
         assert_eq!(event_row(&c, 3), (0, None), "queued event untouched");
         assert_eq!(get_workflow(&c, "w").unwrap().unwrap().module_hash, "v2");
         assert_eq!(get_snapshot(&c, "w").unwrap().unwrap().module_hash, "v2");
+    }
+
+    #[test]
+    fn fire_schedule_is_one_txn_and_enable_toggle_gates_due() {
+        let mut c = mem();
+        insert_module(&c, "h", "m", b"\0asm").unwrap();
+        insert_schedule(&c, "s", "h", "{}", 2000, None, 1000).unwrap();
+        insert_schedule(&c, "sc", "h", "{}", 0, Some("*/2 * * * * *"), 1000).unwrap();
+
+        let due = due_schedules(&c, 1500).unwrap();
+        assert_eq!(due.len(), 2);
+        assert_eq!(due.iter().find(|s| s.id == "sc").unwrap().cron.as_deref(), Some("*/2 * * * * *"));
+
+        fire_schedule(&mut c, &due[0], "w1", 3000).unwrap();
+        assert!(get_workflow(&c, "w1").unwrap().is_some(), "workflow created in the txn");
+        let s = list_schedules(&c).unwrap().into_iter().find(|s| s.id == due[0].id).unwrap();
+        assert_eq!(s.next_run_at, 3000, "advanced to the caller's next");
+
+        assert!(set_schedule_enabled(&c, "sc", false).unwrap());
+        let due = due_schedules(&c, 1500).unwrap();
+        assert!(due.iter().all(|s| s.id != "sc"), "disabled schedules are never due");
+        assert!(!set_schedule_enabled(&c, "nope", true).unwrap(), "unknown id is false");
+    }
+
+    #[test]
+    fn ensure_column_retrofits_pre_v21_schedules_table() {
+        let c = Connection::open_in_memory().unwrap();
+        // A pre-v2.1 schedules table (no cron column), then migrate() over it.
+        c.execute_batch(
+            "CREATE TABLE schedules (
+                id TEXT PRIMARY KEY, module_hash TEXT NOT NULL, input TEXT NOT NULL,
+                interval_ms INTEGER NOT NULL, next_run_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+        migrate(&c).unwrap();
+        migrate(&c).unwrap(); // idempotent: the second pass must not re-ALTER
+        c.execute("INSERT INTO modules (hash, name, wasm, created_at) VALUES ('h','m',x'00',0)", [])
+            .unwrap();
+        insert_schedule(&c, "s", "h", "{}", 0, Some("0 * * * * *"), 1).unwrap();
+        assert_eq!(
+            list_schedules(&c).unwrap()[0].cron.as_deref(),
+            Some("0 * * * * *")
+        );
     }
 
     #[test]

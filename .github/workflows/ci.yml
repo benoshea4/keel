@@ -48,8 +48,10 @@ jobs:
         run: ./scripts/smoke_cancel.sh
       - name: Auth + memory-limit smoke (v1.1)
         run: ./scripts/smoke_auth.sh
-      - name: Effects + schedules + GC smoke (v1.2/v1.3)
+      - name: Effects + schedules + cron + timeout + GC smoke (v1.2/v1.3/v2.1)
         run: ./scripts/smoke_effects.sh
+      - name: Secrets smoke (v2.1)
+        run: ./scripts/smoke_secrets.sh
       - name: Backup + disaster-recovery smoke (v2)
         run: ./scripts/smoke_dr.sh
       - name: Fleet cell-tenancy smoke (v2)

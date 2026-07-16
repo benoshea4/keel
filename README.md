@@ -7,8 +7,8 @@ WIT-typed), journals every side effect to SQLite, and recovers workflows after
 any crash — including `kill -9` mid-run — by deterministic replay. Where this is
 going: [VISION.md](VISION.md) · [ROADMAP.md](ROADMAP.md).
 
-Docs: [operating Keel](docs/operations.md) (deploy, auth, backups/DR, fleet
-tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md).
+Docs: [operating Keel](docs/operations.md) (deploy, auth, secrets, backups/DR,
+fleet tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md).
 
 Built in three phases from [SPEC.md](SPEC.md). **Engineering decisions and
 hand-off notes live in [status.md](status.md) — read that first if you are

@@ -165,12 +165,15 @@ pub mod keel {
             /// opts into retrying transport errors and 5xx — the caller decides,
             /// because auto-retrying a non-idempotent POST is not the engine's call.
             /// Response bodies are utf-8, truncated by the host to 1 MiB.
+            /// v2.1 — `timeout-ms` caps EACH attempt (0 = the engine default, 30s).
+            /// A timeout is a transport failure: `err` (and retried if opted in).
             pub fn http_request(
                 method: &str,
                 url: &str,
                 headers: &[(_rt::String, _rt::String)],
                 body: Option<&str>,
                 retry_attempts: u32,
+                timeout_ms: u32,
             ) -> Result<HttpResponse, _rt::String> {
                 unsafe {
                     #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
@@ -239,7 +242,7 @@ pub mod keel {
                     };
                     let ptr8 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "http-request"]
                         fn wit_import9(
@@ -252,6 +255,7 @@ pub mod keel {
                             _: i32,
                             _: *mut u8,
                             _: usize,
+                            _: i32,
                             _: i32,
                             _: *mut u8,
                         );
@@ -267,6 +271,7 @@ pub mod keel {
                         _: i32,
                         _: *mut u8,
                         _: usize,
+                        _: i32,
                         _: i32,
                         _: *mut u8,
                     ) {
@@ -284,6 +289,7 @@ pub mod keel {
                             result7_1,
                             result7_2,
                             _rt::as_i32(&retry_attempts),
+                            _rt::as_i32(&timeout_ms),
                             ptr8,
                         )
                     };
@@ -385,6 +391,86 @@ pub mod keel {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
+            /// v2.1 — read a named secret from the engine's --secrets-file. The VALUE
+            /// never touches the journal or database: the journal records only the
+            /// name and a salted sha256, and replay re-reads the live file and
+            /// verifies the hash — a secret rotated mid-workflow fails replay loudly
+            /// (restore the old value or cancel the workflow) instead of silently
+            /// diverging. Values of secrets read this way are also redacted from
+            /// journaled http-request/http-get requests ({{secret:name}} placeholder).
+            /// `err` when no secrets file is configured or the name is absent.
+            pub fn secret(name: &str) -> Result<_rt::String, _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = name;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    unsafe extern "C" {
+                        #[link_name = "secret"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(_: *mut u8, _: usize, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import2(ptr0.cast_mut(), len0, ptr1) };
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result10 = match l3 {
+                        0 => {
+                            let e = {
+                                let l4 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l5 = *ptr1
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                let bytes6 = _rt::Vec::from_raw_parts(
+                                    l4.cast(),
+                                    len6,
+                                    len6,
+                                );
+                                _rt::string_lift(bytes6)
+                            };
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l7 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l8 = *ptr1
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len9 = l8;
+                                let bytes9 = _rt::Vec::from_raw_parts(
+                                    l7.cast(),
+                                    len9,
+                                    len9,
+                                );
+                                _rt::string_lift(bytes9)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result10
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
             /// Journaled HTTP GET. ok = response body (utf-8, truncated by host to 1 MiB),
             /// err = human-readable error string. Non-2xx status is an err.
             pub fn http_get(url: &str) -> Result<_rt::String, _rt::String> {
@@ -405,7 +491,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "http-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -463,7 +549,7 @@ pub mod keel {
             pub fn sleep_ms(ms: u64) -> () {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "sleep-ms"]
                         fn wit_import0(_: i64);
@@ -480,7 +566,7 @@ pub mod keel {
             pub fn now_ms() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "now-ms"]
                         fn wit_import0() -> i64;
@@ -498,7 +584,7 @@ pub mod keel {
             pub fn random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "random-u64"]
                         fn wit_import0() -> i64;
@@ -532,7 +618,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "await-event"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -564,7 +650,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "checkpoint"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -589,7 +675,7 @@ pub mod keel {
                     let ptr1 = vec1.as_ptr().cast::<u8>();
                     let len1 = vec1.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-set"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8, _: usize);
@@ -626,7 +712,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -672,7 +758,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.4.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -833,25 +919,26 @@ macro_rules! __export_workflow_impl {
 pub(crate) use __export_workflow_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.4.0:workflow:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.5.0:workflow:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 588] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xcd\x03\x01A\x02\x01\
-A\x08\x01B\x1b\x01o\x02ss\x01p\0\x01r\x03\x06status{\x07headers\x01\x04bodys\x04\
-\0\x0dhttp-response\x03\0\x02\x01ks\x01j\x01\x03\x01s\x01@\x05\x06methods\x03url\
-s\x07headers\x01\x04body\x04\x0eretry-attemptsy\0\x05\x04\0\x0chttp-request\x01\x06\
-\x01j\x01s\x01s\x01@\x01\x03urls\0\x07\x04\0\x08http-get\x01\x08\x01@\x01\x02msw\
-\x01\0\x04\0\x08sleep-ms\x01\x09\x01@\0\0w\x04\0\x06now-ms\x01\x0a\x04\0\x0arand\
-om-u64\x01\x0a\x01@\x01\x04names\0s\x04\0\x0bawait-event\x01\x0b\x01p}\x01@\x01\x05\
-state\x0c\x01\0\x04\0\x0acheckpoint\x01\x0d\x01@\x02\x03keys\x05values\x01\0\x04\
-\0\x06kv-set\x01\x0e\x01@\x01\x03keys\0\x04\x04\0\x06kv-get\x01\x0f\x01@\x01\x03\
-msgs\x01\0\x04\0\x03log\x01\x10\x03\0\x1ckeel:workflow/host-api@0.4.0\x05\0\x01j\
-\x01s\x01s\x01@\x01\x05inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\
-\x03\0\x01\x04\0\x06resume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.4.0\x04\0\x0b\
-\x0e\x01\0\x08workflow\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-co\
-mponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 622] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xef\x03\x01A\x02\x01\
+A\x08\x01B\x1d\x01o\x02ss\x01p\0\x01r\x03\x06status{\x07headers\x01\x04bodys\x04\
+\0\x0dhttp-response\x03\0\x02\x01ks\x01j\x01\x03\x01s\x01@\x06\x06methods\x03url\
+s\x07headers\x01\x04body\x04\x0eretry-attemptsy\x0atimeout-msy\0\x05\x04\0\x0cht\
+tp-request\x01\x06\x01j\x01s\x01s\x01@\x01\x04names\0\x07\x04\0\x06secret\x01\x08\
+\x01@\x01\x03urls\0\x07\x04\0\x08http-get\x01\x09\x01@\x01\x02msw\x01\0\x04\0\x08\
+sleep-ms\x01\x0a\x01@\0\0w\x04\0\x06now-ms\x01\x0b\x04\0\x0arandom-u64\x01\x0b\x01\
+@\x01\x04names\0s\x04\0\x0bawait-event\x01\x0c\x01p}\x01@\x01\x05state\x0d\x01\0\
+\x04\0\x0acheckpoint\x01\x0e\x01@\x02\x03keys\x05values\x01\0\x04\0\x06kv-set\x01\
+\x0f\x01@\x01\x03keys\0\x04\x04\0\x06kv-get\x01\x10\x01@\x01\x03msgs\x01\0\x04\0\
+\x03log\x01\x11\x03\0\x1ckeel:workflow/host-api@0.5.0\x05\0\x01j\x01s\x01s\x01@\x01\
+\x05inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\x03\0\x01\x04\0\x06\
+resume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.5.0\x04\0\x0b\x0e\x01\0\x08work\
+flow\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\
+\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
