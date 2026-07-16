@@ -33,14 +33,27 @@ durable timers, external events, checkpoints + pruning, live v1→v2 upgrade,
 cancel (park-loop + epoch interruption), htmx UI, operator token auth, guest
 memory caps, offline acceptance gates, CI, release binaries.
 
-- **v1.2 — real-world effects:** full `http-request` (verbs, headers, body) as a
-  journaled call; journaled per-workflow KV; cron/scheduled workflow starts;
-  per-call retry policy.
-- **v1.3 — operability:** metrics/OTel, workflow list API with pagination,
-  retention/GC for terminal workflows, backup guidance (litestream).
-- **v2 — a platform, not just an engine:** the WIT world becomes the extension
-  surface — capability providers (event-source connectors, custom journaled
-  effects) so Keel grows effects the way Envoy grows filters.
+- **v1.2 — real-world effects** (the adoption gate: today guests can only GET,
+  sleep and wait — nobody can build a real workflow yet):
+  `http-request` (method, headers, body, per-call timeout/retry) as a journaled
+  call; journaled per-workflow KV (`kv-set`/`kv-get` — durable state without
+  checkpoint gymnastics); cron/scheduled workflow starts. Stretch: a `secret`
+  host call, once the journals-contain-what-guests-read tension has a written
+  design.
+- **v1.3 — operability:** workflow list API with pagination, metrics/OTel,
+  retention/GC for terminal workflows, backup guidance (litestream), UI logout.
+- **v2 — a platform, not just an engine:** split into library + binary so Keel
+  embeds in-process (the positioning, literally); the WIT world becomes the
+  extension surface — capability providers (event-source connectors, custom
+  journaled effects) so Keel grows effects the way Envoy grows filters.
+
+**On multi-tenancy** (asked often enough to answer here): never tenant columns
+in one shared DB — that couples every tenant to a single SQLite writer lock and
+one blast radius, and rewrites auth for a cloud product with no users yet.
+Tenancy is **cells**: one keel process + one DB + one token per tenant, which
+v1.1 already shapes (per-process token, per-guest caps, 8 MB binary). The thin
+`keel fleet` supervisor that spawns/routes cells is v2 work, after the engine
+is worth hosting.
 
 ## The two ideas we deliberately parked
 
