@@ -1,23 +1,22 @@
 # Keel — build status & hand-off notes
 
-This file is the continuation handbook for whoever (or whatever model) builds next.
-The source of truth for WHAT to build is [SPEC.md](SPEC.md) (a copy of
+This file is the continuation handbook for whoever (or whatever model) works here
+next. The source of truth for WHAT was built is [SPEC.md](SPEC.md) (a copy of
 `../durable-engine-build-spec.md`, rev 1.1). This file records what exists, what was
-verified, every deviation from the spec and why, and exactly where Phase 2 starts.
+verified, and every deviation from the spec and why.
 
-**Before writing any code: re-read SPEC.md §0 ("Rules for the builder") — the spec
-itself demands re-reading it at each phase.**
+**Before writing any code: re-read SPEC.md §0 ("Rules for the builder").**
 
 ---
 
 ## TL;DR — where things stand
 
-- **Phase 1: COMPLETE and VERIFIED.** `scripts/accept_phase1.sh` printed
-  `PHASE 1 PASS` twice in a row on 2026-07-15, and again on 2026-07-16 at the
-  phase-2 tree (no regression from the durable-sleep replacement).
-- **Phase 2: COMPLETE and VERIFIED.** `scripts/accept_phase2.sh` printed
-  `PHASE 2 PASS` twice in a row, fresh DB each time, on 2026-07-16.
-- **Phase 3: NOT STARTED.** Begin at SPEC.md Task 3.1. Pointers + landmines below.
+- **ALL THREE PHASES: COMPLETE and VERIFIED. The spec is fully built.**
+- Phase 1 (journal + replay + kill -9 recovery): `PHASE 1 PASS` ×2 on 2026-07-15.
+- Phase 2 (durable timers, events, UI, cap): `PHASE 2 PASS` ×2 on 2026-07-16.
+- Phase 3 (checkpoints, pruning, live upgrade): `PHASE 3 PASS` ×2 on 2026-07-16.
+- All three suites re-ran green at HEAD (fresh DBs) after the last commit — the
+  phase-3 WIT/runner changes did not regress earlier phases.
 
 Build/run cheatsheet (run from this directory, `keel/`):
 
@@ -25,12 +24,15 @@ Build/run cheatsheet (run from this directory, `keel/`):
 cargo build --release -p keel-engine                # engine → target/release/keel
 (cd guests/demo && cargo component build --release --target wasm32-unknown-unknown)
 (cd guests/approval && cargo component build --release --target wasm32-unknown-unknown)
+(cd guests/counter && cargo component build --release --target wasm32-unknown-unknown)  # +--features v2
 ./scripts/accept_phase1.sh                          # must print PHASE 1 PASS
 ./scripts/accept_phase2.sh                          # must print PHASE 2 PASS
+./scripts/accept_phase3.sh                          # must print PHASE 3 PASS
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
-workflow at `/workflows/<id>` with a 2s-polling detail + "Send event" form.
+workflow at `/workflows/<id>` with a 2s-polling detail, "Send event" form, and —
+when parked + checkpointed — an "Upgrade module" control.
 
 ---
 
@@ -128,6 +130,32 @@ Phase 2 additions (2026-07-16):
     the first two gaps are reachable; the spec lists all three values, so the 2s
     slot is coded (and documented) as the next step if attempts are ever raised.
 
+Phase 3 additions (2026-07-16):
+
+13. **checkpoint's exec closure opens a scoped SECOND Connection** (host.rs). The
+    spec routes checkpoint through `journaled()`, but exec is `FnOnce()` and
+    cannot borrow `self.j.db` while journaled holds `&mut self`. Ctx carries
+    db_path for this. Safe because the snapshot+prune txn and the wrapper's
+    row-C INSERT are two separate transactions BY DESIGN (spec: "the wrapper then
+    inserts journal row C as usual"); a crash between them leaves the snapshot at
+    C with row C missing — tolerated, since resume starts at C+1 and never reads
+    row C. This is the one place the one-connection-per-thread rule bends.
+14. **Bounded join by polling `JoinHandle::is_finished`** (api.rs upgrade step 3)
+    instead of the spec's `spawn_blocking(join)` + timeout sketch. Reason: on
+    timeout, spawn_blocking has consumed the handle, so a retry would find the
+    registry empty, conclude "thread already exited", and step 5 would spawn a
+    SECOND live worker on the same journal (nondeterminism). Polling keeps the
+    handle owned; on timeout it goes BACK into the registry (`put_thread`). The
+    final `join()` only runs once `is_finished()` is true, so nothing blocks the
+    async handler.
+15. **The upgrade handler re-validates after the join** (status still parked,
+    snapshot re-read for a FRESH C) and **clears the abort flag unconditionally**
+    after the join/None resolution. Guards two races the spec's steps leave open:
+    a worker that wakes and advances (or completes) between validation and the
+    abort landing must not be resurrected from a stale C; and on the
+    thread-already-exited path a set-but-never-observed abort flag would
+    instantly kill the respawned worker at its first park.
+
 Non-deviations worth knowing: `component-model` is a default wasmtime-43 feature (the
 spec's FALLBACK note applies but the explicit feature is harmless); `bindgen!` found
 the wit dir at `path: "../wit"` without needing the engine/wit copy fallback.
@@ -143,7 +171,7 @@ to 0.3.0 and is breaking by design (adds a `resume` export) — all guests get a
 
 ---
 
-## What exists (file map, phases 1–2)
+## What exists (file map, all phases)
 
 ```
 keel/
@@ -151,25 +179,29 @@ keel/
 ├── SPEC.md                  the build spec — THE source of truth
 ├── status.md                this file
 ├── README.md                includes the REQUIRED verbatim runaway-guest warning (§0 non-goals)
-├── wit/workflow.wit         0.2.0 contract (await-event added 2.1). Phase 3 bumps to 0.3.0 (BREAKING)
+├── wit/workflow.wit         0.3.0 contract: http-get/sleep-ms/now-ms/random-u64/await-event/
+│                            checkpoint/log imports; run + resume exports
 ├── engine/
 │   ├── build.rs             Task 2.8 — fails the build if assets/htmx.min.js is missing
 │   ├── assets/              htmx.min.js (2.0.10, vendored+committed) + style.css (exact spec palette)
 │   ├── templates/           askama: dashboard, _workflows_table, workflow, _workflow_detail, modules
 │   └── src/
-│       ├── main.rs          Task 1.1 CLI (serve --db --listen --max-running) + 1.4 recovery scan + router
-│       ├── db.rs            §5+2.2 schema + open_conn() + set_status() + ALL SQL helpers (see dev. 8)
+│       ├── main.rs          CLI (serve --db --listen --max-running) + recovery scan + router
+│       ├── db.rs            full schema (5 tables) + open_conn() + set_status() + ALL SQL helpers (dev. 8)
 │       ├── journal.rs       §6 journaled() core — SPEC-VERBATIM, the heart of the engine
-│       ├── host.rs          host-api impl; park loops for sleep-ms (2.4) + await-event (2.5); AbortForUpgrade
-│       ├── notifier.rs      Task 2.3 condvar wake-ups + phase-3 abort set (latency only, never correctness)
-│       ├── runner.rs        EngineShared + one-thread-per-workflow + Permit cap (2.7) + terminal statuses
-│       ├── api.rs           JSON API, 5 endpoints; three of them also accept form/multipart (dev. 11)
-│       └── ui.rs            Task 2.8 askama-render-to-Html handlers + embedded assets
+│       ├── host.rs          host-api impl; park loops (2.4/2.5); checkpoint (3.3); AbortForUpgrade
+│       ├── notifier.rs      condvar wake-ups + abort set (latency only, never correctness)
+│       ├── runner.rs        EngineShared + thread-per-workflow + Permit cap + thread registry +
+│       │                    snapshot-aware start (resume) + abort-sentinel result match
+│       ├── api.rs           JSON API, 6 endpoints incl. upgrade; several also accept form/multipart
+│       └── ui.rs            askama-render-to-Html handlers + embedded assets + upgrade control
 ├── guests/demo/             Task 1.6 acceptance guest (src/bindings.rs is GENERATED — don't edit)
 ├── guests/approval/         Task 2.9 acceptance guest: await-event("approve") → sleep 60s → output
+├── guests/counter/          Task 3.7 acceptance guest: v1/v2 via feature flag; ticks + checkpoints
 └── scripts/
     ├── accept_phase1.sh     Task 1.7 — spec-verbatim acceptance
-    └── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
+    ├── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
+    └── accept_phase3.sh     Task 3.8 — pruning; resume recovery; v1→v2 live upgrade; 409 negative
 ```
 
 Read the header comment of each file first — they carry the invariants and mark every
@@ -224,73 +256,51 @@ PHASE 2 / PHASE 3 surgery point with the task number.
   - workflows.output = `{"approved_with":{"by":"alice"}}`; timers table empty.
   - UI smoke: dashboard, workflow page (contains full id), embedded htmx all serve.
 
+- `scripts/accept_phase3.sh`: **PHASE 3 PASS, twice in a row, fresh DB each time**
+  (2026-07-16). Evidence from the second run:
+  - snapshots row present by t≈12s; journal ≤ 4 rows throughout (pruning works —
+    at completion the journal is exactly ONE row, the final `checkpoint(15)`).
+  - engine.log: `resuming <id> from checkpoint seq 3` TWICE — once for the kill -9
+    recovery, once for the post-upgrade respawn (same C; the upgrade landed before
+    the next tick's checkpoint).
+  - upgrade → 200; final output `{"note":"upgraded","total":8}` — v2 parsed the
+    v1 state blob and carried the tick count; `workflows.module_hash` == v2 hash;
+    snapshot state ended as v2-shaped JSON.
+  - upgrading the completed workflow → 409.
+- After the final commit, ALL THREE suites were re-run at HEAD in sequence:
+  `PHASE 1 PASS`, `PHASE 2 PASS`, `PHASE 3 PASS` — no cross-phase regressions.
+
 Git history note: phase 1 was built in a single pass and committed per-task
 afterwards; individual historical commits group files by task but were not each
-built in isolation. Phase 2 WAS built task-by-task (each of 2.1–2.10 compiled
-and was committed in order). HEAD is the verified tree.
+built in isolation. Phases 2 and 3 WERE built task-by-task (each numbered task
+compiled and was committed in order). HEAD is the verified tree.
 
 ---
 
-## Phase 3 — where to start and what will bite
+## Build complete — notes for whoever works here next
 
-Work Tasks 3.1 → 3.8 in order (SPEC.md). Re-read SPEC.md §0 first. File-level
-pointers and landmines:
+The spec is fully built; there is no "next task". If you extend Keel, keep these
+rails:
 
-- **3.1 WIT 0.3.0 (BREAKING)**: add `checkpoint: func(state: list<u8>)` to host-api
-  AND `export resume: func(state: list<u8>) -> result<string, string>` to the world.
-  Engine: `cargo build` regenerates bindings → implement `checkpoint` on the Host
-  impl AND handle the new `call_resume` (3.4). Guests: BOTH existing guests need the
-  stub `resume` (`Err("no checkpoints")`) and a rebuild (`cargo component build`
-  regenerates each guest's bindings.rs — commit them). `list<u8>` maps to `Vec<u8>`
-  on both sides.
-- **3.2 schema**: APPEND `snapshots` to MIGRATION in db.rs (spec has the exact SQL).
-- **3.3 checkpoint host fn**: spec says "goes through journaled()" with exec doing
-  the snapshot txn — LANDMINE: exec is `FnOnce()` and cannot borrow `self.j.db`
-  (journaled already holds `&mut self`). Two clean outs: (a) give Ctx the db_path
-  (EngineShared has it) and open a scoped second Connection inside exec for the
-  snapshot+prune transaction — safe because that txn and the wrapper's row-C INSERT
-  are two separate transactions BY DESIGN (spec: "the wrapper then inserts journal
-  row C as usual"); or (b) hand-roll like sleep_ms/await_event (db.rs helpers, same
-  invariants). (a) stays closest to the spec's words. Invariant either way: after a
-  checkpoint at C, journal = row C plus rows > C.
-- **3.4 recovery via resume**: runner.rs run_workflow — SELECT snapshots row;
-  None → `next_seq = 0`, `call_run(input)` (unchanged); Some → assert
-  `snap.module_hash == wf.module_hash` (mismatch → status failed + explanation),
-  `next_seq = snap.journal_seq + 1`, `call_resume(&snap.state)`. Log EXACTLY
-  `resuming <id> from checkpoint seq <C>` — accept_phase3 greps engine.log for
-  "resuming". Note `Ctx` construction currently pins `next_seq: 0` with a comment
-  pointing here.
-- **3.5 thread registry + abort**: `AbortForUpgrade` already exists in host.rs
-  (real Error type; park loops bail with it — nothing to change there). Add the
-  `Mutex<HashMap<String, JoinHandle<()>>>` to EngineShared; spawn() inserts, the
-  thread removes ITSELF on every exit path. In run_workflow's result match, check
-  `err.root_cause().downcast_ref::<AbortForUpgrade>()` FIRST (FALLBACK: walk
-  err.chain()); if aborted → clear_abort, leave status untouched, exit silently.
-  Careful: the trap arrives as `wasmtime::Error` — convert (`anyhow::Error::from`)
-  before downcasting, or downcast on the wasmtime error's chain directly.
-- **3.6 upgrade endpoint**: POST /api/workflows/{id}/upgrade. Follow the spec's 6
-  steps in order. The landmines it already flags: claim-set guard released on
-  EVERY exit; `join` only inside `tokio::task::spawn_blocking` bounded at 30s;
-  `clear_abort` on the timeout/409 path (else the workflow zombifies at its next
-  park — troubleshooting table); the tail-discard txn must also un-deliver events
-  (`delivered_seq > C → delivered=0, delivered_seq=NULL`) and delete timers.
-  `runner::spawn` here is sanctioned call-site 3 of 3. README gets the documented
-  wrinkle: an in-flight sleep restarts with a FRESH full duration after upgrade
-  (its timer + journal tail were discarded). notifier.rs: remove the two
-  `#[allow(dead_code)]` when set_abort/clear_abort gain callers.
-- **3.7 counter guests**: one crate `guests/counter`, cargo feature `v2` switching
-  state shape + tick behavior (spec pins both). Build twice (with/without
-  `--features v2`) and COPY the first .wasm aside — same output filename.
-- **3.8 acceptance**: fresh DB; assert pruning keeps journal ≤4 rows after ~12s of
-  5s-tick checkpoints; kill -9 → grep "resuming"; upgrade to v2 → 200; completed
-  output has `"note":"upgraded"` and `"total":8`; upgrading a completed workflow →
-  409. PASS twice, fresh DB each time. Reuse accept_phase2.sh's structure.
-
-Cross-phase reminders: axum routes use `{id}` (deviation 1); every new host-call
-error path ends `.map_err(trap)?` (deviation 3); new SQL goes in db.rs (dev. 8);
-the UI upgrade control (3.6 step 6) belongs in `_workflow_detail.html` +
-`templates` — it must only render when status ∈ {sleeping, waiting_event} AND a
-snapshot exists, which means the detail query needs the snapshots row too.
+- **The §0 invariants above are permanent.** Journal-commit-before-return; no
+  replay mode; every SQL statement in db.rs (journal.rs excepted); every
+  Connection from `db::open_conn`; every workflows status write through
+  `db::set_status`; `runner::spawn` only from its three call-sites (api.rs
+  creation, main.rs recovery, api.rs upgrade step 5).
+- **The acceptance scripts are the regression suite.** Run all three after any
+  engine change; they are the definition of "still works". They need network
+  (example.com), port 8080 free, and `cargo-component` on PATH (~/.cargo/bin).
+- **Extending the WIT**: adding an import is source-compatible but old uploaded
+  .wasm BLOBS keyed to an older interface version will not instantiate (see the
+  WIT-versioning caveat above). Adding/renaming exports is breaking for all
+  guests. Journal `kind`/payload shapes (§4.2) are ON-DISK format — never rename.
+- **Known accepted limitations** (spec non-goals — do not "fix" casually):
+  runaway guests pin their thread (epoch interruption deferred); at-least-once
+  effects on crash between exec and journal INSERT; parked workflows hold
+  --max-running permits; a mid-sleep upgrade restarts the sleep in full;
+  no auth/TLS/clustering/metrics; guest HTTP is GET-only.
+- **Upgrade machinery subtleties** live in deviations 13–15 — read them before
+  touching host.rs checkpoint, the thread registry, or api.rs upgrade_workflow.
 
 ## Debugging crib
 
@@ -298,9 +308,12 @@ snapshot exists, which means the detail query needs the snapshots row too.
 - Inspect a run: `sqlite3 accept1.db 'SELECT seq,kind,request,response FROM journal ORDER BY seq'`
   and `SELECT id,status,output FROM workflows`. Phase 2 state lives in
   `SELECT * FROM timers` (one row per sleeping workflow, gone after wake) and
-  `SELECT name,delivered,delivered_seq FROM events` (phase-2 DB is `accept2.db`).
+  `SELECT name,delivered,delivered_seq FROM events`; phase 3 in
+  `SELECT journal_seq, module_hash FROM snapshots` (acceptance DBs: accept1/2/3.db).
 - A parked workflow reacts to events/wakes within ~1s even if the Notifier misses —
   if it doesn't, suspect a Connection opened outside db::open_conn (locked DB).
+- A workflow stuck parked with NO thread after a failed upgrade = abort flag left
+  set (should be impossible — the handler clears it on every path; see dev. 15).
 - Consult the Troubleshooting table at the bottom of SPEC.md BEFORE improvising —
   most "weird" failures are listed there with fixes.
 - Kill a stray engine: `pkill -f 'keel serve'` (acceptance scripts leave none on
