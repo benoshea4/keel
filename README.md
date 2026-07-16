@@ -41,8 +41,25 @@ curl -s localhost:8080/api/workflows/<id>/journal            # the journal itsel
 
 Prove durability to yourself: start the demo workflow, `kill -9` the engine during its
 15-second sleep, start it again — the workflow completes without re-running the
-already-journaled HTTP call. `scripts/accept_phase1.sh` does exactly this, with
-assertions.
+already-journaled HTTP call, and the sleep resumes from its original deadline instead
+of restarting. `scripts/accept_phase1.sh` does exactly this, with assertions.
+
+## UI and events (phase 2)
+
+The same binary serves a small htmx UI: `http://127.0.0.1:8080/` lists workflows
+(2s live refresh), `/modules` uploads components and starts workflows, and each
+workflow page has a journal view plus a "Send event" form. Workflows can park on
+external events (`await-event` in the WIT contract); deliver one with:
+
+```bash
+curl -s -X POST localhost:8080/api/workflows/<id>/events \
+  -H 'content-type: application/json' \
+  -d '{"name":"approve","payload":{"by":"alice"}}'          # -> 202
+```
+
+`scripts/accept_phase2.sh` proves the phase-2 story: kill -9 while parked on an
+event, kill -9 again mid-sleep, and the workflow still completes exactly once with
+the delivered payload.
 
 ## Known, accepted limitation: runaway guests
 

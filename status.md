@@ -13,17 +13,24 @@ itself demands re-reading it at each phase.**
 ## TL;DR — where things stand
 
 - **Phase 1: COMPLETE and VERIFIED.** `scripts/accept_phase1.sh` printed
-  `PHASE 1 PASS` twice in a row on 2026-07-15 (definition of done met).
-- **Phase 2: NOT STARTED.** Begin at SPEC.md Task 2.1. Pointers + landmines below.
-- **Phase 3: NOT STARTED.**
+  `PHASE 1 PASS` twice in a row on 2026-07-15, and again on 2026-07-16 at the
+  phase-2 tree (no regression from the durable-sleep replacement).
+- **Phase 2: COMPLETE and VERIFIED.** `scripts/accept_phase2.sh` printed
+  `PHASE 2 PASS` twice in a row, fresh DB each time, on 2026-07-16.
+- **Phase 3: NOT STARTED.** Begin at SPEC.md Task 3.1. Pointers + landmines below.
 
 Build/run cheatsheet (run from this directory, `keel/`):
 
 ```bash
 cargo build --release -p keel-engine                # engine → target/release/keel
 (cd guests/demo && cargo component build --release --target wasm32-unknown-unknown)
+(cd guests/approval && cargo component build --release --target wasm32-unknown-unknown)
 ./scripts/accept_phase1.sh                          # must print PHASE 1 PASS
+./scripts/accept_phase2.sh                          # must print PHASE 2 PASS
 ```
+
+UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
+workflow at `/workflows/<id>` with a 2s-polling detail + "Send event" form.
 
 ---
 
@@ -47,6 +54,8 @@ cargo build --release -p keel-engine                # engine → target/release/
 | axum | "0.8" | 0.8.9 | route syntax gotcha — deviation 1 |
 | ureq | "2" | 2.12.1 | as spec'd (do NOT bump to ureq 3; API differs) |
 | wit-bindgen-rt (guest) | n/a | 0.44.0 | must match what cargo-component 0.21.1 generates; taken from its own template |
+| askama | "0.12" | 0.12.1 | phase 2 UI; NO askama_axum on purpose (render to String → axum Html) |
+| htmx (vendored) | "@2" | 2.0.10 | committed at `engine/assets/htmx.min.js`; build.rs fails the build if it goes missing |
 
 `Cargo.lock` is committed — trust it over this table.
 
@@ -92,15 +101,49 @@ cargo build --release -p keel-engine                # engine → target/release/
 8. **`db.rs` owns every SQL statement — except journal.rs.** The spec demands both
    "keep every SQL statement in db.rs" (§ execution notes) and "implement journal.rs
    exactly" (§6, which contains SQL). §6 wins for journal.rs; everything else goes
-   through db.rs helpers.
+   through db.rs helpers. Phase 2 kept this: the park-loop host calls use db.rs
+   helpers (`get_journal_row`/`insert_journal_row`/timers/events) instead of inline
+   SQL, and the single-transaction event delivery lives in
+   `db::deliver_event_and_journal`.
+
+Phase 2 additions (2026-07-16):
+
+9. **Park-loop status writes happen in host.rs, not runner.rs.** Phase 1's note
+   "status transitions live in runner.rs only" was superseded by the spec's own
+   Task 2.4/2.5 pseudocode (`UPDATE status='sleeping'` inside the host call).
+   Terminal transitions (completed/failed) are still runner.rs-only; every write
+   still goes through `db::set_status`.
+10. **`AbortForUpgrade` is already a real error type** (`host.rs`), not a bail
+    string — Task 3.5's downcast (`root_cause().downcast_ref::<AbortForUpgrade>()`)
+    will work without reworking the park loops. Nothing sets the abort flag until
+    phase 3; the loops' `is_aborted` checks are live but dormant.
+11. **The three write endpoints accept a second body shape** (Task 2.8 requires
+    it for the UI forms): `/api/modules` takes raw bytes OR multipart
+    (`file` + `name` fields); `/api/workflows` and `/api/workflows/{id}/events`
+    take JSON OR urlencoded forms (JSON carried as text in `input`/`payload`
+    fields, validated server-side). Implementation: handlers take `Request` and
+    branch on content-type via `FromRequest` — the JSON paths are byte-identical
+    to phase 1. hx-post sends urlencoded, hence the form shape on events.
+12. **HTTP retry backoff schedule `[500ms, 1s, 2s]` with 3 attempts** means only
+    the first two gaps are reachable; the spec lists all three values, so the 2s
+    slot is coded (and documented) as the next step if attempts are ever raised.
 
 Non-deviations worth knowing: `component-model` is a default wasmtime-43 feature (the
 spec's FALLBACK note applies but the explicit feature is harmless); `bindgen!` found
 the wit dir at `path: "../wit"` without needing the engine/wit copy fallback.
 
+One WIT-versioning caveat for later phases: bumping the package to 0.2.0 required
+REBUILDING both guests (bindings.rs is generated from the wit). "Adding an import is
+non-breaking" is a source-level promise — an old `.wasm` BLOB compiled against
+`host-api@0.1.0` will not instantiate against a linker that only exports 0.2.0
+(0.x minors are semver-incompatible). Fresh-DB acceptance never sees this, but a
+long-lived deployment upgrading the engine under stored modules would. Phase 3 bumps
+to 0.3.0 and is breaking by design (adds a `resume` export) — all guests get a stub
+`resume` then, per Task 3.1.
+
 ---
 
-## What exists (Phase 1 file map)
+## What exists (file map, phases 1–2)
 
 ```
 keel/
@@ -108,16 +151,25 @@ keel/
 ├── SPEC.md                  the build spec — THE source of truth
 ├── status.md                this file
 ├── README.md                includes the REQUIRED verbatim runaway-guest warning (§0 non-goals)
-├── wit/workflow.wit         0.1.0 contract — §4 verbatim. Phase 2 bumps to 0.2.0
-├── engine/src/
-│   ├── main.rs              Task 1.1 CLI (`keel serve --db --listen`) + Task 1.4 recovery scan + router
-│   ├── db.rs                §5 schema + open_conn() + set_status() + all SQL helpers
-│   ├── journal.rs           §6 journaled() core — SPEC-VERBATIM, the heart of the engine
-│   ├── host.rs              Task 1.2 bindgen! + host-api impl (http-get/sleep-ms/now-ms/random-u64/log)
-│   ├── runner.rs            Task 1.3 EngineShared + one-thread-per-workflow + status transitions
-│   └── api.rs               Task 1.5 JSON API (4 endpoints)
+├── wit/workflow.wit         0.2.0 contract (await-event added 2.1). Phase 3 bumps to 0.3.0 (BREAKING)
+├── engine/
+│   ├── build.rs             Task 2.8 — fails the build if assets/htmx.min.js is missing
+│   ├── assets/              htmx.min.js (2.0.10, vendored+committed) + style.css (exact spec palette)
+│   ├── templates/           askama: dashboard, _workflows_table, workflow, _workflow_detail, modules
+│   └── src/
+│       ├── main.rs          Task 1.1 CLI (serve --db --listen --max-running) + 1.4 recovery scan + router
+│       ├── db.rs            §5+2.2 schema + open_conn() + set_status() + ALL SQL helpers (see dev. 8)
+│       ├── journal.rs       §6 journaled() core — SPEC-VERBATIM, the heart of the engine
+│       ├── host.rs          host-api impl; park loops for sleep-ms (2.4) + await-event (2.5); AbortForUpgrade
+│       ├── notifier.rs      Task 2.3 condvar wake-ups + phase-3 abort set (latency only, never correctness)
+│       ├── runner.rs        EngineShared + one-thread-per-workflow + Permit cap (2.7) + terminal statuses
+│       ├── api.rs           JSON API, 5 endpoints; three of them also accept form/multipart (dev. 11)
+│       └── ui.rs            Task 2.8 askama-render-to-Html handlers + embedded assets
 ├── guests/demo/             Task 1.6 acceptance guest (src/bindings.rs is GENERATED — don't edit)
-└── scripts/accept_phase1.sh Task 1.7 — spec-verbatim acceptance
+├── guests/approval/         Task 2.9 acceptance guest: await-event("approve") → sleep 60s → output
+└── scripts/
+    ├── accept_phase1.sh     Task 1.7 — spec-verbatim acceptance
+    └── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
 ```
 
 Read the header comment of each file first — they carry the invariants and mark every
@@ -142,10 +194,14 @@ PHASE 2 / PHASE 3 surgery point with the task number.
 
 ## Verification record
 
-- `cargo build` (debug + release): clean, **0 warnings**.
+- `cargo build` (debug + release): clean, **0 warnings** (the two
+  `#[allow(dead_code)]` in notifier.rs are deliberate phase-3 stubs).
 - `guests/demo`: builds with cargo-component 0.21.1 → 27KB component.
-- `scripts/accept_phase1.sh`: **PHASE 1 PASS, twice in a row** (2026-07-15).
-  Evidence from the run, in case you need to compare against a regression:
+  `guests/approval`: → 24KB component.
+- `scripts/accept_phase1.sh`: **PHASE 1 PASS, twice in a row** (2026-07-15), and
+  again 2026-07-16 on the phase-2 tree — the durable-sleep replacement did not
+  regress it (restart now sleeps only the remainder, so it completes FASTER).
+  Evidence from the original run, for regression comparison:
   - engine.log shows `recovering workflow <id>` after the kill -9 restart, and the
     replayed "first fetch" guest log line lands ~100µs after workflow start (journal
     read, no network) vs the live run's ~120ms — replay path confirmed.
@@ -153,59 +209,98 @@ PHASE 2 / PHASE 3 surgery point with the task number.
     exactly 2 http-get rows total (pre-crash call NOT re-executed).
   - workflows.output stamp == journaled random-u64 value (deterministic replay).
   - Duplicate guest log lines after restart are EXPECTED (log is not journaled, §4.1).
+- `scripts/accept_phase2.sh`: **PHASE 2 PASS, twice in a row, fresh DB each time**
+  (2026-07-16). Evidence from the second run:
+  - Survived kill -9 at BOTH park points (waiting_event, then mid-sleep); 2×
+    `recovering workflow` in engine.log.
+  - `wake_at` identical before/after the mid-sleep crash (W1 == W2): the sleep
+    resumed its remainder instead of restarting.
+  - journal = exactly 2 rows:
+    `await-event(0) {"name":"approve"} → {"payload":"{\"by\":\"alice\"}"}` and
+    `sleep-ms(1) {"ms":60000} → {}` — §4.2 shapes exactly; exactly ONE await-event
+    row (the crash after delivery did not re-deliver).
+  - events row ends `delivered=1, delivered_seq=0` (the phase-3 un-delivery
+    machinery has what it needs).
+  - workflows.output = `{"approved_with":{"by":"alice"}}`; timers table empty.
+  - UI smoke: dashboard, workflow page (contains full id), embedded htmx all serve.
 
 Git history note: phase 1 was built in a single pass and committed per-task
 afterwards; individual historical commits group files by task but were not each
-built in isolation. HEAD is the verified tree.
+built in isolation. Phase 2 WAS built task-by-task (each of 2.1–2.10 compiled
+and was committed in order). HEAD is the verified tree.
 
 ---
 
-## Phase 2 — where to start and what will bite
+## Phase 3 — where to start and what will bite
 
-Work Tasks 2.1 → 2.10 in order (SPEC.md). File-level pointers:
+Work Tasks 3.1 → 3.8 in order (SPEC.md). Re-read SPEC.md §0 first. File-level
+pointers and landmines:
 
-- **2.1 WIT 0.2.0**: edit `wit/workflow.wit` (bump package version, add `await-event`
-  to host-api). `cargo build` regenerates engine bindings; add the new method to the
-  `Host` impl in host.rs (return type `wasmtime::Result<String>`, `.map_err(trap)?`
-  pattern). Adding an import is non-breaking for existing guests.
-- **2.2 schema**: APPEND `timers` + `events` tables to `MIGRATION` in db.rs. Never
-  ALTER. Note `events.delivered_seq` exists specifically so phase-3 upgrades can
-  un-deliver events (SPEC.md explains).
-- **2.3 notifier.rs**: new file + `mod notifier;` in main.rs. get-or-insert semantics
-  on BOTH wait and notify (a notify before the first wait must not be lost). The
-  Notifier is a latency optimization ONLY — every park loop still polls the DB at 1s.
-  Add it + abort-set to `EngineShared` and a handle into `Ctx` (host.rs).
-- **2.4 durable sleep**: REPLACES host.rs sleep_ms. Hand-rolled journal check + timers
-  row + park loop — do NOT force it through journaled() (the spec shows the exact
-  algorithm). Status flips to 'sleeping' — remember set_status, and notifier abort
-  checks (they're phase-3 hooks but the spec wants them in the loop now).
-- **2.5 events**: await_event host fn + POST /api/workflows/{id}/events endpoint in
-  api.rs (+ notify). The deliver+journal single transaction is MANDATORY — use
-  `rusqlite::Connection::transaction()` on the JournalCtx's connection.
-- **2.6 http retries**: inside do_http_get only (live path). 3 attempts, 500ms/1s/2s,
-  retry transport + ≥500 only. One journal row regardless.
-- **2.7 --max-running**: default 256, `Arc<(Mutex<u32>, Condvar)>` permit counter in
-  EngineShared, acquired at thread start. Print the starvation warning at startup
-  when >80% held (spec text).
-- **2.8 htmx UI**: new ui.rs + templates/ + assets/. Vendor htmx locally (COMMIT it),
-  build.rs that panics if missing. NO askama_axum — render to String, wrap in
-  `axum::response::Html`. askama 0.12 is already in Cargo.toml (unused so far).
-  Exact colors/copy rules are in the spec — follow them literally.
-  NOTE: axum route syntax `{id}` (deviation 1) applies to all new routes.
-- **2.9 approval guest**: copy guests/demo, adjust (await-event("approve") →
-  sleep 60s → output). Same Cargo.toml shape (wit-bindgen-rt 0.44).
-- **2.10 acceptance**: write scripts/accept_phase2.sh in the same style; the spec
-  lists the steps/assertions. Reminder: after restart, poll up to 15s for
-  `waiting_event` (recovery passes through 'running' — immediate assert = flake).
+- **3.1 WIT 0.3.0 (BREAKING)**: add `checkpoint: func(state: list<u8>)` to host-api
+  AND `export resume: func(state: list<u8>) -> result<string, string>` to the world.
+  Engine: `cargo build` regenerates bindings → implement `checkpoint` on the Host
+  impl AND handle the new `call_resume` (3.4). Guests: BOTH existing guests need the
+  stub `resume` (`Err("no checkpoints")`) and a rebuild (`cargo component build`
+  regenerates each guest's bindings.rs — commit them). `list<u8>` maps to `Vec<u8>`
+  on both sides.
+- **3.2 schema**: APPEND `snapshots` to MIGRATION in db.rs (spec has the exact SQL).
+- **3.3 checkpoint host fn**: spec says "goes through journaled()" with exec doing
+  the snapshot txn — LANDMINE: exec is `FnOnce()` and cannot borrow `self.j.db`
+  (journaled already holds `&mut self`). Two clean outs: (a) give Ctx the db_path
+  (EngineShared has it) and open a scoped second Connection inside exec for the
+  snapshot+prune transaction — safe because that txn and the wrapper's row-C INSERT
+  are two separate transactions BY DESIGN (spec: "the wrapper then inserts journal
+  row C as usual"); or (b) hand-roll like sleep_ms/await_event (db.rs helpers, same
+  invariants). (a) stays closest to the spec's words. Invariant either way: after a
+  checkpoint at C, journal = row C plus rows > C.
+- **3.4 recovery via resume**: runner.rs run_workflow — SELECT snapshots row;
+  None → `next_seq = 0`, `call_run(input)` (unchanged); Some → assert
+  `snap.module_hash == wf.module_hash` (mismatch → status failed + explanation),
+  `next_seq = snap.journal_seq + 1`, `call_resume(&snap.state)`. Log EXACTLY
+  `resuming <id> from checkpoint seq <C>` — accept_phase3 greps engine.log for
+  "resuming". Note `Ctx` construction currently pins `next_seq: 0` with a comment
+  pointing here.
+- **3.5 thread registry + abort**: `AbortForUpgrade` already exists in host.rs
+  (real Error type; park loops bail with it — nothing to change there). Add the
+  `Mutex<HashMap<String, JoinHandle<()>>>` to EngineShared; spawn() inserts, the
+  thread removes ITSELF on every exit path. In run_workflow's result match, check
+  `err.root_cause().downcast_ref::<AbortForUpgrade>()` FIRST (FALLBACK: walk
+  err.chain()); if aborted → clear_abort, leave status untouched, exit silently.
+  Careful: the trap arrives as `wasmtime::Error` — convert (`anyhow::Error::from`)
+  before downcasting, or downcast on the wasmtime error's chain directly.
+- **3.6 upgrade endpoint**: POST /api/workflows/{id}/upgrade. Follow the spec's 6
+  steps in order. The landmines it already flags: claim-set guard released on
+  EVERY exit; `join` only inside `tokio::task::spawn_blocking` bounded at 30s;
+  `clear_abort` on the timeout/409 path (else the workflow zombifies at its next
+  park — troubleshooting table); the tail-discard txn must also un-deliver events
+  (`delivered_seq > C → delivered=0, delivered_seq=NULL`) and delete timers.
+  `runner::spawn` here is sanctioned call-site 3 of 3. README gets the documented
+  wrinkle: an in-flight sleep restarts with a FRESH full duration after upgrade
+  (its timer + journal tail were discarded). notifier.rs: remove the two
+  `#[allow(dead_code)]` when set_abort/clear_abort gain callers.
+- **3.7 counter guests**: one crate `guests/counter`, cargo feature `v2` switching
+  state shape + tick behavior (spec pins both). Build twice (with/without
+  `--features v2`) and COPY the first .wasm aside — same output filename.
+- **3.8 acceptance**: fresh DB; assert pruning keeps journal ≤4 rows after ~12s of
+  5s-tick checkpoints; kill -9 → grep "resuming"; upgrade to v2 → 200; completed
+  output has `"note":"upgraded"` and `"total":8`; upgrading a completed workflow →
+  409. PASS twice, fresh DB each time. Reuse accept_phase2.sh's structure.
 
-Phase 3 afterwards: WIT 0.3.0 is a BREAKING guest change (adds `resume` export);
-all guests get a stub `resume` then; fresh DB for acceptance.
+Cross-phase reminders: axum routes use `{id}` (deviation 1); every new host-call
+error path ends `.map_err(trap)?` (deviation 3); new SQL goes in db.rs (dev. 8);
+the UI upgrade control (3.6 step 6) belongs in `_workflow_detail.html` +
+`templates` — it must only render when status ∈ {sleeping, waiting_event} AND a
+snapshot exists, which means the detail query needs the snapshots row too.
 
 ## Debugging crib
 
 - Engine logs: stdout (acceptance scripts redirect to `engine.log`).
 - Inspect a run: `sqlite3 accept1.db 'SELECT seq,kind,request,response FROM journal ORDER BY seq'`
-  and `SELECT id,status,output FROM workflows`.
+  and `SELECT id,status,output FROM workflows`. Phase 2 state lives in
+  `SELECT * FROM timers` (one row per sleeping workflow, gone after wake) and
+  `SELECT name,delivered,delivered_seq FROM events` (phase-2 DB is `accept2.db`).
+- A parked workflow reacts to events/wakes within ~1s even if the Notifier misses —
+  if it doesn't, suspect a Connection opened outside db::open_conn (locked DB).
 - Consult the Troubleshooting table at the bottom of SPEC.md BEFORE improvising —
   most "weird" failures are listed there with fixes.
 - Kill a stray engine: `pkill -f 'keel serve'` (acceptance scripts leave none on
