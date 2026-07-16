@@ -411,6 +411,30 @@ pub fn snapshot_and_prune(
     Ok(())
 }
 
+pub struct SnapshotRow {
+    pub journal_seq: i64,
+    pub state: Vec<u8>,
+    pub module_hash: String,
+}
+
+/// Task 3.4 — the runner checks this before every start: a snapshot switches the
+/// start path from call_run(input) at seq 0 to call_resume(state) at seq C+1.
+pub fn get_snapshot(c: &Connection, workflow_id: &str) -> Result<Option<SnapshotRow>> {
+    Ok(c
+        .query_row(
+            "SELECT journal_seq, state, module_hash FROM snapshots WHERE workflow_id = ?1",
+            [workflow_id],
+            |r| {
+                Ok(SnapshotRow {
+                    journal_seq: r.get(0)?,
+                    state: r.get(1)?,
+                    module_hash: r.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 /// Task 1.4 — this query IS the recovery implementation: every non-terminal workflow
 /// simply gets started again from seq 0; the journal turns re-execution into replay.
 pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {

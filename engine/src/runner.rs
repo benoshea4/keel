@@ -12,9 +12,6 @@
 // host.rs park loops (Tasks 2.4/2.5) because they flip mid-guest-call — every
 // write still goes through db::set_status. Terminal: completed, failed.
 //
-// PHASE 2 (Task 2.7): the --max-running permit counter wraps the thread body.
-// PHASE 3 (Task 3.4): snapshot-aware start — next_seq = snapshot.journal_seq + 1 and
-// call_resume(state) instead of call_run(input) when a snapshots row exists.
 // PHASE 3 (Task 3.5): JoinHandle registry + AbortForUpgrade sentinel check in the
 // result match below (aborted threads exit silently, leaving status untouched).
 
@@ -137,14 +134,38 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
     let mut linker: Linker<Ctx> = Linker::new(&shared.engine);
     Workflow::add_to_linker::<_, HasSelf<Ctx>>(&mut linker, |c| c)?;
 
-    // next_seq is ALWAYS 0 — recovery is not special; replay happens row-by-row
-    // inside journaled() (SPEC.md §0 rule 2). Phase 3's snapshot resume is the only
-    // exception (next_seq = snapshot.journal_seq + 1, call_resume instead of run).
+    // Task 3.4 — snapshot-aware start. No snapshot: next_seq = 0 and call_run —
+    // recovery is not special (§0 rule 2). Snapshot at C: hand the guest its own
+    // state blob via call_resume and start the seq counter at C+1. Rows > C still
+    // replay through the identical journaled() path — this is NOT a replay mode.
+    let snap = db::get_snapshot(&conn, id)?;
+    if let Some(s) = &snap {
+        if s.module_hash != wf.module_hash {
+            // A snapshot must not resume under different code: the state blob's
+            // meaning is defined by the module that wrote it. The upgrade endpoint
+            // (Task 3.6) is the one sanctioned way to move both together.
+            db::set_status(
+                &conn,
+                id,
+                "failed",
+                Some(&format!(
+                    "snapshot was written by module {} but the workflow now points at {} — \
+                     refusing to resume; use POST /api/workflows/{id}/upgrade to change code",
+                    s.module_hash, wf.module_hash
+                )),
+            )?;
+            return Ok(());
+        }
+        // accept_phase3.sh greps engine.log for "resuming" — keep this wording.
+        tracing::info!("resuming {id} from checkpoint seq {}", s.journal_seq);
+    }
+    let next_seq = snap.as_ref().map_or(0, |s| s.journal_seq + 1);
+
     let ctx = Ctx {
         j: JournalCtx {
             workflow_id: id.to_string(),
             db: conn,
-            next_seq: 0,
+            next_seq,
         },
         http: shared.http.clone(),
         notifier: shared.notifier.clone(),
@@ -154,7 +175,10 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
     let instance = Workflow::instantiate(&mut store, &component, &linker)?;
 
     db::set_status(&store.data().j.db, id, "running", None)?;
-    let result = instance.call_run(&mut store, &wf.input);
+    let result = match &snap {
+        None => instance.call_run(&mut store, &wf.input),
+        Some(s) => instance.call_resume(&mut store, &s.state),
+    };
 
     // Reclaim this thread's connection to record the outcome (store owns Ctx which
     // owns the Connection — one connection per thread, start to finish).
