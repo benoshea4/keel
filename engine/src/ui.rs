@@ -156,6 +156,13 @@ struct ModulesPage {
     modules: Vec<ModRow>,
 }
 
+#[derive(Template)]
+#[template(path = "login.html")]
+struct LoginPage {
+    // Empty string = no error paragraph rendered.
+    error: String,
+}
+
 fn render<T: Template>(t: T) -> Result<Html<String>, UiErr> {
     Ok(Html(t.render().map_err(|e| internal(e.into()))?))
 }
@@ -298,4 +305,60 @@ pub async fn modules_page(State(shared): State<Arc<EngineShared>>) -> Result<Htm
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     let modules = mod_rows(&conn)?;
     render(ModulesPage { modules })
+}
+
+// --- v1.1 auth pages ---------------------------------------------------------------
+
+/// GET /login — pointless without a configured token, so open mode redirects home.
+pub async fn login_page(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<axum::response::Response, UiErr> {
+    use axum::response::IntoResponse;
+    if shared.api_token.is_none() {
+        return Ok(axum::response::Redirect::to("/").into_response());
+    }
+    Ok(render(LoginPage { error: String::new() })?.into_response())
+}
+
+/// POST /login (urlencoded: token=...). Correct token → HttpOnly SameSite=Lax
+/// cookie carrying the token's digest (never the raw token), redirect home.
+/// Wrong token → 401 with the form again, error stated.
+pub async fn login_submit(
+    State(shared): State<Arc<EngineShared>>,
+    axum::extract::Form(f): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, UiErr> {
+    use axum::response::IntoResponse;
+    if shared.api_token.is_none() {
+        return Ok(axum::response::Redirect::to("/").into_response());
+    }
+    let presented = f.get("token").map(String::as_str).unwrap_or("");
+    if crate::auth::login_ok(&shared, presented) {
+        let cookie = format!(
+            "keel_token={}; HttpOnly; SameSite=Lax; Path=/",
+            crate::auth::cookie_value(shared.api_token.as_deref().unwrap_or(""))
+        );
+        Ok((
+            [(header::SET_COOKIE, cookie)],
+            axum::response::Redirect::to("/"),
+        )
+            .into_response())
+    } else {
+        let page = render(LoginPage {
+            error: "wrong token — pass the value from --api-token / KEEL_API_TOKEN".to_string(),
+        })?;
+        Ok((StatusCode::UNAUTHORIZED, page).into_response())
+    }
+}
+
+/// GET /logout — clears the cookie whether or not auth is on.
+pub async fn logout() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        [(
+            header::SET_COOKIE,
+            "keel_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0".to_string(),
+        )],
+        axum::response::Redirect::to("/login"),
+    )
+        .into_response()
 }

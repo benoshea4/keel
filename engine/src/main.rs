@@ -12,6 +12,7 @@
 // assets/htmx.min.js exists.
 
 mod api;
+mod auth;
 mod db;
 mod host;
 mod journal;
@@ -49,6 +50,16 @@ enum Cmd {
         /// generously above your total live workflow count.
         #[arg(long, default_value_t = 256)]
         max_running: u32,
+        /// v1.1 — operator bearer token. When set, every API call needs
+        /// `Authorization: Bearer <token>` and the UI needs a login. Prefer the
+        /// env var so the token stays out of `ps` output. Unset = open mode
+        /// (loopback only — see "Scope and security posture" in the README).
+        #[arg(long, env = "KEEL_API_TOKEN")]
+        api_token: Option<String>,
+        /// v1.1 — per-guest linear-memory cap in MiB. A guest that outgrows it
+        /// fails (allocation error → trap) instead of eating the host.
+        #[arg(long, default_value_t = 256)]
+        max_guest_memory_mb: usize,
     },
 }
 
@@ -60,11 +71,19 @@ async fn main() -> Result<()> {
             db,
             listen,
             max_running,
-        } => serve(db, listen, max_running).await,
+            api_token,
+            max_guest_memory_mb,
+        } => serve(db, listen, max_running, api_token, max_guest_memory_mb).await,
     }
 }
 
-async fn serve(db_path: String, listen: String, max_running: u32) -> Result<()> {
+async fn serve(
+    db_path: String,
+    listen: String,
+    max_running: u32,
+    api_token: Option<String>,
+    max_guest_memory_mb: usize,
+) -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -72,7 +91,18 @@ async fn serve(db_path: String, listen: String, max_running: u32) -> Result<()> 
     let conn = db::open_conn(&db_path)?;
     db::migrate(&conn)?;
 
-    let shared = Arc::new(runner::EngineShared::new(db_path.clone(), max_running)?);
+    if api_token.is_none() {
+        tracing::warn!(
+            "no --api-token / KEEL_API_TOKEN set: every endpoint is open — fine on \
+             127.0.0.1, do NOT expose this listener wider without a token"
+        );
+    }
+    let shared = Arc::new(runner::EngineShared::new(
+        db_path.clone(),
+        max_running,
+        api_token,
+        max_guest_memory_mb.max(1) * 1024 * 1024,
+    )?);
 
     // Task 1.4 — recovery scan. This IS the entire crash-recovery implementation:
     // start every non-terminal workflow from the beginning; the journal turns
@@ -119,6 +149,14 @@ async fn serve(db_path: String, listen: String, max_running: u32) -> Result<()> 
         .route("/modules", get(ui::modules_page))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))
+        // v1.1 — auth. The middleware wraps every route above; /login, /logout
+        // and /assets/* are allowlisted inside it. No token configured → no-op.
+        .route("/login", get(ui::login_page).post(ui::login_submit))
+        .route("/logout", get(ui::logout))
+        .layer(axum::middleware::from_fn_with_state(
+            shared.clone(),
+            auth::require_auth,
+        ))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;

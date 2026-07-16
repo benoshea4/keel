@@ -54,10 +54,21 @@ pub struct EngineShared {
     /// Task 3.6 — workflow ids with an upgrade in flight (step 1's claim set).
     /// api.rs's UpgradeClaim guard inserts/removes.
     pub upgrades: Mutex<std::collections::HashSet<String>>,
+    /// v1.1 — operator bearer token (--api-token / KEEL_API_TOKEN). None = open
+    /// mode (loopback-intended, the v1.0 behavior). Consumed by auth.rs.
+    pub api_token: Option<String>,
+    /// v1.1 — per-guest linear-memory cap in bytes (--max-guest-memory-mb).
+    /// Enforced via wasmtime StoreLimits; a guest that outgrows it fails.
+    pub max_guest_memory: usize,
 }
 
 impl EngineShared {
-    pub fn new(db_path: String, max_running: u32) -> Result<Self> {
+    pub fn new(
+        db_path: String,
+        max_running: u32,
+        api_token: Option<String>,
+        max_guest_memory: usize,
+    ) -> Result<Self> {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         // Post-review hardening: epoch interruption, so a guest stuck in pure
@@ -89,6 +100,8 @@ impl EngineShared {
             running_cv: Condvar::new(),
             threads: Mutex::new(HashMap::new()),
             upgrades: Mutex::new(std::collections::HashSet::new()),
+            api_token,
+            max_guest_memory,
         })
     }
 
@@ -275,8 +288,14 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
         http: shared.http.clone(),
         notifier: shared.notifier.clone(),
         db_path: shared.db_path.clone(),
+        // v1.1 — cap the guest's linear memory; growth beyond it fails, which
+        // the guest sees as allocation failure (typically a trap → failed).
+        limits: wasmtime::StoreLimitsBuilder::new()
+            .memory_size(shared.max_guest_memory)
+            .build(),
     };
     let mut store = Store::new(&shared.engine, ctx);
+    store.limiter(|c| &mut c.limits);
     // Post-review hardening: with epoch_interruption on, every store needs a
     // deadline. The callback re-arms it each 1s tick unless the abort flag is
     // set — turning cancel/upgrade into a trap even for guests that never park.

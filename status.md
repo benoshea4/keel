@@ -34,6 +34,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_phase2.sh                          # must print PHASE 2 PASS
 ./scripts/accept_phase3.sh                          # must print PHASE 3 PASS
 ./scripts/smoke_cancel.sh                           # must print CANCEL SMOKE PASS
+./scripts/smoke_auth.sh                             # must print AUTH+LIMITS SMOKE PASS
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -207,6 +208,17 @@ E. **Cancel endpoint + epoch interruption.** `POST /api/workflows/{id}/cancel`
    the same silent-exit chain). Cancel shares the upgrade claim set (no
    interleaving) and `abort_and_join` (api.rs) is the shared bounded-join.
    `guests/spin` (a `loop {}` guest) exists to regression-test this.
+F5. *(v1.1, same day)* **Auth + guest memory limits** — the go-public
+   prerequisites. `--api-token` / `KEEL_API_TOKEN` (unset = v1.0 open mode with
+   a startup warning): auth.rs middleware wraps the whole router, allowlisting
+   /assets/*, /login, /logout; API callers send `Authorization: Bearer`, the UI
+   logs in at /login and gets an HttpOnly SameSite=Lax cookie carrying
+   hex(sha256(token)) — never the raw token; comparisons are hash-then-compare
+   (timing-safe without a constant-time dep). `--max-guest-memory-mb` (default
+   256) builds a wasmtime StoreLimits per store; a guest that outgrows it
+   fails. `scripts/smoke_auth.sh` gates all of it (401s, bearer lifecycle,
+   cookie digest, open-mode regression, 1 MiB cap → failed).
+
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant
    locking on the exit path and Permit::drop). Two indexes (events park-loop
@@ -265,8 +277,10 @@ keel/
     ├── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
     ├── accept_phase3.sh     Task 3.8 — pruning; resume recovery; v1→v2 live upgrade; 409 negative
     ├── smoke_cancel.sh      cancel both ways: parked (park loop) + spinning (epoch trap)
+    ├── smoke_auth.sh        v1.1 gate: bearer/cookie auth + guest memory cap
     └── stub/body.txt        fixed body served on :18080 by accept_phase1.sh
 ```
+(v1.1 additions inside engine/: src/auth.rs — token middleware; templates/login.html.)
 
 Read the header comment of each file first — they carry the invariants and mark every
 PHASE 2 / PHASE 3 surgery point with the task number.

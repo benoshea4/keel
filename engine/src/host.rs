@@ -42,6 +42,9 @@ pub struct Ctx {
     /// For host calls whose journaled() exec closure needs its own scoped
     /// Connection (checkpoint, Task 3.3) — exec can't borrow j.db.
     pub db_path: String,
+    /// v1.1 — per-store resource caps (linear memory). runner.rs builds it and
+    /// registers it via store.limiter().
+    pub limits: wasmtime::StoreLimits,
 }
 
 /// Sentinel error a worker thread bails with when the notifier's abort flag is

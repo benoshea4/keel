@@ -1,13 +1,15 @@
 # Keel
 
-A single-binary durable execution engine in Rust. It embeds [wasmtime], runs
-user-supplied WASM workflow *components* (component model, WIT-typed), journals every
-side effect to SQLite, and recovers workflows after any crash — including `kill -9`
-mid-run — by deterministic replay.
+**The SQLite of workflow engines**: durable execution you just run — no cluster,
+no sidecar, no SDK handshake. A single-binary engine in Rust that embeds
+[wasmtime], runs user-supplied WASM workflow *components* (component model,
+WIT-typed), journals every side effect to SQLite, and recovers workflows after
+any crash — including `kill -9` mid-run — by deterministic replay. Where this is
+going: [VISION.md](VISION.md).
 
-Built in three phases from [SPEC.md](SPEC.md). **Current build progress, decisions,
-and hand-off notes live in [status.md](status.md) — read that first if you are
-continuing the build.**
+Built in three phases from [SPEC.md](SPEC.md). **Engineering decisions and
+hand-off notes live in [status.md](status.md) — read that first if you are
+continuing the build.** MIT licensed.
 
 ## How it works (one paragraph)
 
@@ -109,17 +111,27 @@ and `guests/spin` (spinning).
 
 `cargo test -p keel-engine` runs unit tests for the journal replay/nondeterminism
 core and the multi-statement transactions (event delivery, upgrade tail-discard,
-sleep wake, cancel) against in-memory SQLite. The four scripts under `scripts/`
-are the end-to-end gates; all of it runs in CI on every push
-(`.github/workflows/ci.yml`) — fully offline, phase 1 fetches a local stub.
+sleep wake, cancel) against in-memory SQLite. The five scripts under `scripts/`
+are the end-to-end gates (three phase suites, cancel, auth+limits); all of it
+runs in CI on every push (`.github/workflows/ci.yml`) — fully offline, phase 1
+fetches a local stub.
 
 ## Scope and security posture
 
-Keel binds `127.0.0.1` by default and has **no authentication**: anyone who can
-reach the port can upload and execute arbitrary WASM, and the guest `http-get`
-capability will fetch any URL the engine's host can reach (including internal
-addresses). Keep it on loopback, or put an authenticating proxy in front of it
-before choosing `--listen` on a wider interface.
+Keel binds `127.0.0.1` by default and starts in **open mode** (no auth) for
+frictionless local use. To expose it wider, set an operator token — then every
+API call needs `Authorization: Bearer <token>` and the UI gets a login page:
+
+```bash
+KEEL_API_TOKEN=$(openssl rand -hex 24) ./target/release/keel serve --listen 0.0.0.0:8080
+```
+
+Remember the trust model even with a token: whoever holds it can upload and
+execute arbitrary WASM, and the guest `http-get` capability fetches any URL the
+engine's host can reach (including internal addresses). Terminate TLS in front
+of it — e.g. Caddy: `your.domain { reverse_proxy 127.0.0.1:8080 }` — and treat
+the token like a root credential. Guests are additionally capped per workflow
+(`--max-guest-memory-mb`, default 256; plus the 1s epoch tick for cancel).
 
 Other non-goals (all phases): multi-node clustering, authentication, TLS, HTTP methods
 other than GET in the guest API, streaming bodies, physical linear-memory snapshots,

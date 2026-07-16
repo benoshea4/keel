@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — log in</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header>
+    <h1>Keel</h1>
+  </header>
+
+  <h2>Log in</h2>
+  <p>This engine requires its operator token (the value of <code>--api-token</code>
+     or <code>KEEL_API_TOKEN</code>).</p>
+  {% if !error.is_empty() %}
+  <p class="error">{{ error }}</p>
+  {% endif %}
+  <form action="/login" method="post">
+    <label for="token">Operator token</label>
+    <input id="token" name="token" type="password" required autofocus>
+    <button type="submit">Log in</button>
+  </form>
+</body>
+</html>
