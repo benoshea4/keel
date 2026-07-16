@@ -1159,6 +1159,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "keel-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "ureq",
+ "uuid",
+ "wasmtime",
+]
+
+[[package]]
 name = "keel-engine"
 version = "0.1.0"
 dependencies = [
@@ -1167,7 +1183,7 @@ dependencies = [
  "axum",
  "clap",
  "hex",
- "rusqlite",
+ "keel-core",
  "serde",
  "serde_json",
  "sha2",
@@ -1175,9 +1191,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "ureq",
  "uuid",
- "wasmtime",
 ]
 
 [[package]]

@@ -54,6 +54,13 @@ pub struct Ctx {
     /// across replay because secret() traps on any value change. Never
     /// persisted anywhere.
     pub read_secrets: Vec<(String, String)>,
+    /// v2.2 — the process-wide wasmtime Engine (Arc-backed clone): provider
+    /// calls build their own short-lived Store on it.
+    pub engine: wasmtime::Engine,
+    /// v2.2 — compiled capability providers by name (see provider.rs).
+    pub providers: Arc<std::collections::HashMap<String, wasmtime::component::Component>>,
+    /// v2.2 — provider calls reuse the per-guest memory cap.
+    pub max_guest_memory: usize,
 }
 
 impl Ctx {
@@ -380,6 +387,61 @@ impl keel::workflow::host_api::Host for Ctx {
                 Ok(Err(e))
             }
         }
+    }
+
+    fn provider_call(
+        &mut self,
+        name: String,
+        kind: String,
+        request: String,
+    ) -> wasmtime::Result<Result<String, String>> {
+        // v2.2 — capability providers (provider.rs, PROVIDERS.md). Journaled
+        // like any effect: kind `custom:<name>:<kind>` (provider identity
+        // lives in the KIND so replay verifies the guest still calls the same
+        // provider), request redacted like http-request. Replay returns the
+        // recorded response without instantiating the provider at all. An
+        // unregistered name is a guest-visible err — journaled, so a replay
+        // on an engine where the provider has since been registered STILL
+        // returns the recorded err (determinism beats convenience).
+        #[derive(Serialize)]
+        struct Req {
+            request: String,
+        }
+        #[derive(Serialize, Deserialize)]
+        #[serde(untagged)]
+        enum Resp {
+            Ok { ok: String },
+            Err { err: String },
+        }
+        let jkind = format!("custom:{name}:{kind}");
+        let jreq = Req {
+            request: redact(&request, &self.read_secrets),
+        };
+        let engine = self.engine.clone();
+        let providers = self.providers.clone();
+        let max_mem = self.max_guest_memory;
+        let r = self
+            .j
+            .journaled(&jkind, &jreq, move || {
+                Ok(match providers.get(&name) {
+                    None => Resp::Err {
+                        err: format!("no provider '{name}' registered on this engine"),
+                    },
+                    Some(component) => {
+                        tracing::info!("invoking provider {name} kind {kind}");
+                        match crate::provider::call(&engine, component, max_mem, &kind, &request)
+                        {
+                            Ok(ok) => Resp::Ok { ok },
+                            Err(err) => Resp::Err { err },
+                        }
+                    }
+                })
+            })
+            .map_err(trap)?;
+        Ok(match r {
+            Resp::Ok { ok } => Ok(ok),
+            Resp::Err { err } => Err(err),
+        })
     }
 
     fn sleep_ms(&mut self, ms: u64) -> wasmtime::Result<()> {

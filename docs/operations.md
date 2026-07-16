@@ -19,6 +19,7 @@ Flags that matter in production:
 | `--retain-terminal-hours` | 0 (keep forever) | GC completed/failed workflows (journal, events, snapshots, kv included) after this many hours. |
 | `--backup-dir` + `--backup-interval-secs` + `--backup-keep` | off / 300 / 24 | Periodic online snapshots (below). |
 | `--secrets-file` | unset | KEY=VALUE file backing the `secret` host call (below). |
+| `--provider name=path.wasm` | none | Register a capability provider (repeatable) — see [PROVIDERS.md](../PROVIDERS.md). Compiled + type-checked at boot; a bad provider fails the start. |
 
 ## Exposing it
 
@@ -109,7 +110,8 @@ db = "acme.db"
 api_token = "..."      # per-tenant root credential
 # optional per-tenant: max_running, max_guest_memory_mb,
 # retain_terminal_hours, backup_dir, backup_interval_secs, backup_keep,
-# secrets_file (per-tenant secrets — cells never share one)
+# secrets_file (per-tenant secrets — cells never share one),
+# providers = ["name=path.wasm", ...] (per-tenant capability providers)
 
 [[tenants]]
 name = "globex"

@@ -29,6 +29,12 @@ pub struct Notifier {
     aborts: Mutex<HashSet<String>>,
 }
 
+impl Default for Notifier {
+    fn default() -> Self {
+        Notifier::new()
+    }
+}
+
 impl Notifier {
     pub fn new() -> Self {
         Notifier {

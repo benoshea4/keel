@@ -22,8 +22,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --release -p keel-engine --all-targets -- -D warnings
-      - run: cargo test --release -p keel-engine
+      - run: cargo clippy --release --workspace --all-targets -- -D warnings
+      - run: cargo test --release --workspace
 
   acceptance:
     runs-on: ubuntu-latest
@@ -54,8 +54,12 @@ jobs:
         run: ./scripts/smoke_secrets.sh
       - name: Backup + disaster-recovery smoke (v2)
         run: ./scripts/smoke_dr.sh
-      - name: Fleet cell-tenancy smoke (v2)
+      - name: Fleet cell-tenancy smoke (v2, per-tenant providers v2.2)
         run: ./scripts/smoke_fleet.sh
+      - name: Embedded keel-core smoke (v2.2 crate split)
+        run: ./scripts/smoke_embedded.sh
+      - name: Capability providers smoke (v2.2)
+        run: ./scripts/smoke_providers.sh
       - name: Engine log on failure
         if: failure()
         run: tail -100 engine.log || true

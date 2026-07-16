@@ -21,8 +21,8 @@ use axum::Json;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::db;
-use crate::runner::{self, EngineShared};
+use keel_core::db;
+use keel_core::runner::{self, EngineShared};
 
 type ApiErr = (StatusCode, String);
 
@@ -133,10 +133,12 @@ pub async fn create_workflow(
     if !db::module_exists(&conn, &module_hash).map_err(internal)? {
         return Err((StatusCode::NOT_FOUND, "unknown module hash".to_string()));
     }
-    let id = uuid::Uuid::new_v4().to_string();
-    // Input is stored as an opaque JSON string; the engine never inspects it.
-    db::create_workflow(&conn, &id, &module_hash, &input_json).map_err(internal)?;
-    runner::spawn(shared.clone(), id.clone()); // sanctioned spawn call-site 1 of 4 (§0)
+    drop(conn);
+    // v2.2 — the HTTP path and embedders share ONE create+spawn implementation
+    // (spawn call-site 1 of 4 lives inside start_workflow, lib.rs).
+    let id = keel_core::Engine::from_shared(shared.clone())
+        .start_workflow(&module_hash, &input_json)
+        .map_err(internal)?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -485,11 +487,11 @@ pub async fn create_schedule(
             if ms < 1000 {
                 return Err(bad("interval_ms must be >= 1000"));
             }
-            (ms, crate::journal::now_ms() + ms)
+            (ms, keel_core::journal::now_ms() + ms)
         }
         (None, Some(expr)) => {
-            let c = crate::cron::parse(expr).map_err(bad)?;
-            let first = c.next_after(crate::journal::now_ms()).ok_or_else(|| {
+            let c = keel_core::cron::parse(expr).map_err(bad)?;
+            let first = c.next_after(keel_core::journal::now_ms()).ok_or_else(|| {
                 bad(format!("cron '{expr}' never matches a future time (impossible date?)"))
             })?;
             (0, first)

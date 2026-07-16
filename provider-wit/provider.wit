@@ -1,0 +1,19 @@
+// The contract for capability providers (v2.2) — design doc: PROVIDERS.md.
+//
+// A provider extends Keel's effect surface WITHOUT touching engine code: the
+// engine journals around handle() (kind `custom:<name>:<kind>`), so provider
+// results replay like any built-in effect. Providers import NOTHING — no
+// clocks, no sockets, not even host-api. Same zero-ambient-capability rule as
+// guests, only stricter: a provider is a pure request→response sandbox.
+//
+// This package is versioned independently of keel:workflow — bumping one
+// never forces rebuilding the other side's components.
+package keel:provider@0.1.0;
+
+world provider {
+    /// kind: which operation (one provider may serve several);
+    /// request: JSON text, opaque to the engine.
+    /// ok = JSON response text (journaled verbatim); err = message handed to
+    /// the calling guest as a guest-visible error (data, not a trap).
+    export handle: func(kind: string, request: string) -> result<string, string>;
+}

@@ -1,3 +1,7 @@
+# The `keel` binary: HTTP API + UI + auth + fleet + the serve-time loops
+# (scheduler, backups, GC), all on top of the keel-core library (../core) —
+# the v2.2 crate split. Everything journal-shaped lives in keel-core.
+
 [package]
 name = "keel-engine"
 version = "0.1.0"
@@ -10,17 +14,13 @@ path = "src/main.rs"
 # Versions are the spec's known-good minimums (SPEC.md §3). Rule 5: if one stops
 # resolving, bump to latest stable and note it in status.md.
 [dependencies]
-wasmtime = { version = "43", features = ["component-model"] }
-# FALLBACK: if "component-model" is rejected as unknown, it is on by default
-# in this wasmtime version — remove the features list.
+keel-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 axum = { version = "0.8", features = ["multipart"] }   # multipart needed for the
                                                         # phase-2 module upload form
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }  # backup: v2 DR (online snapshots)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-ureq = { version = "2", features = ["tls"] }
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }

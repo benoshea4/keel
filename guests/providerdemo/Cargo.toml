@@ -1,0 +1,27 @@
+# v2.2 acceptance guest — exercises provider-call end to end: two calls to
+# the greet provider around a durable sleep (scripts/smoke_providers.sh
+# kill -9s the engine in the gap and asserts the provider is NOT re-invoked
+# on replay), plus a call to an unregistered provider (must come back as a
+# guest-visible err, not a trap).
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "providerdemo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:providerdemo"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"

@@ -39,6 +39,8 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_dr.sh                               # must print DR SMOKE PASS (backup/restore)
 ./scripts/smoke_fleet.sh                            # must print FLEET SMOKE PASS (cell tenancy)
 ./scripts/smoke_secrets.sh                          # must print SECRETS SMOKE PASS (v2.1)
+./scripts/smoke_embedded.sh                         # must print EMBEDDED SMOKE PASS (v2.2 crate split)
+./scripts/smoke_providers.sh                        # must print PROVIDERS SMOKE PASS (v2.2)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -291,6 +293,38 @@ H. *(v2.1, 2026-07-16 — secrets / cron / timeout, WIT 0.5.0)*
      tests (cron parser/next-fire, secrets parse/redact, fire_schedule txn,
      ensure_column retrofit).
 
+I. *(v2.2, 2026-07-16 — crate split + capability providers, WIT 0.6.0)*
+   - **keel-core** (core/): db, journal, notifier, host, runner, cron,
+     provider moved out of the binary crate VERBATIM (git mv; in-crate
+     `crate::` paths unchanged). The binary keeps main/api/auth/ui/fleet and
+     consumes `keel_core::*`; rusqlite is re-exported from keel-core so the
+     workspace can never carry two versions. `Engine` façade (lib.rs):
+     `EngineOptions::new(db)` + `Engine::open` (open+migrate+RECOVERY — the
+     binary and embedders share the startup path), `upload_module`,
+     `start_workflow`, `workflow`. EngineShared::new now takes EngineOptions.
+     Spawn call-sites stay EXACTLY FOUR: 1 start_workflow (lib — api.rs's
+     create_workflow now goes through it), 2 Engine::open recovery (lib),
+     3 upgrade step 5 (bin), 4 scheduler (bin). Upgrade/cancel orchestration
+     deliberately stays bin-side (documented in lib.rs).
+   - **Providers** (core/src/provider.rs + provider-wit/ + PROVIDERS.md):
+     import-free `keel:provider` components (`handle(kind, request) →
+     result<json, err>`), registered `--provider name=path.wasm` ([a-z0-9-]
+     names, compiled + instantiate_pre + export-typed at BOOT — bad provider
+     = failed start), per-tenant `providers = [...]` in fleet configs.
+     provider-call journals `custom:<name>:<kind>` with the request REDACTED
+     (secrets) — replay never re-instantiates (gate counts the live-path
+     "invoking provider" log line). Bounds: guest memory cap + ~10-tick
+     epoch budget (a spinning provider is an err, never a pinned worker).
+     Unknown name/kind/trap/budget = guest-visible err, journaled as data
+     (stays an err on replay even if the provider is later registered).
+   - Gates: `smoke_embedded.sh` (counter runs in-process via
+     core/tests/embedded.rs; examples/embedded.rs compiles in the same
+     invocation), `smoke_providers.sh` (boot refusal on junk provider;
+     replay-not-reinvoked across kill -9; custom:* journal kinds;
+     unregistered provider errs as data), `smoke_fleet.sh` extended
+     (provider on tenant A completes, same guest on tenant B fails with
+     "no provider 'greet'"). CI lint/test now --workspace.
+
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant
    locking on the exit path and Permit::drop). Two indexes (events park-loop
@@ -315,7 +349,12 @@ to 0.3.0 and is breaking by design (adds a `resume` export) — all guests get a
 
 ```
 keel/
-├── Cargo.toml               workspace = ["engine"], exclude guests (deviation 5)
+├── Cargo.toml               workspace = ["core", "engine"], exclude guests+providers (dev. 5)
+├── core/                    keel-core LIBRARY (v2.2 split): db/journal/notifier/host/
+│                            runner/cron/provider + the Engine façade (lib.rs), the
+│                            embedded gate (tests/embedded.rs, examples/embedded.rs)
+├── provider-wit/            keel:provider world (capability providers — PROVIDERS.md)
+├── providers/greet/         sample provider component (smoke_providers.sh)
 ├── SPEC.md                  the build spec — THE source of truth
 ├── status.md                this file
 ├── README.md                quick start + cancel/tests/security sections (the spec's verbatim

@@ -23,9 +23,9 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::Html;
 
-use crate::db;
-use crate::journal::now_ms;
-use crate::runner::EngineShared;
+use keel_core::db;
+use keel_core::journal::now_ms;
+use keel_core::runner::EngineShared;
 
 type UiErr = (StatusCode, String);
 
@@ -204,7 +204,7 @@ pub async fn workflows_partial(
     })
 }
 
-fn mod_rows(conn: &rusqlite::Connection) -> Result<Vec<ModRow>, UiErr> {
+fn mod_rows(conn: &keel_core::rusqlite::Connection) -> Result<Vec<ModRow>, UiErr> {
     Ok(db::list_modules(conn)
         .map_err(internal)?
         .into_iter()

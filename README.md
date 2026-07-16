@@ -8,7 +8,20 @@ any crash — including `kill -9` mid-run — by deterministic replay. Where thi
 going: [VISION.md](VISION.md) · [ROADMAP.md](ROADMAP.md).
 
 Docs: [operating Keel](docs/operations.md) (deploy, auth, secrets, backups/DR,
-fleet tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md).
+fleet tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md) ·
+[capability providers](PROVIDERS.md).
+
+**Embeddable, literally** (since v2.2 the engine is a library, `keel-core`,
+and the server is one consumer of it):
+
+```rust
+let engine = keel_core::Engine::open(keel_core::EngineOptions::new("app.db"))?;
+let hash = engine.upload_module("demo", &wasm_bytes)?;
+let id = engine.start_workflow(&hash, r#"{"target":2}"#)?;
+// kill -9 the process here; Engine::open recovers it next start
+```
+
+Full example: [`core/examples/embedded.rs`](core/examples/embedded.rs).
 
 Built in three phases from [SPEC.md](SPEC.md). **Engineering decisions and
 hand-off notes live in [status.md](status.md) — read that first if you are

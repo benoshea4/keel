@@ -19,7 +19,8 @@
 //   db = "acme.db"           # database path, unique
 //   api_token = "..."        # passed via env, never argv
 //   # optional: max_running, max_guest_memory_mb, retain_terminal_hours,
-//   #           backup_dir, backup_interval_secs, backup_keep, secrets_file
+//   #           backup_dir, backup_interval_secs, backup_keep, secrets_file,
+//   #           providers = ["name=path.wasm", ...]
 
 use std::collections::HashSet;
 use std::process::{Child, Command, Stdio};
@@ -45,6 +46,9 @@ struct Tenant {
     backup_interval_secs: Option<u64>,
     backup_keep: Option<usize>,
     secrets_file: Option<String>,
+    /// v2.2 — capability providers, "name=path.wasm" each (repeated
+    /// --provider args on the child; the child's boot validates them).
+    providers: Option<Vec<String>>,
 }
 
 fn validate(cfg: &FleetConfig) -> Result<()> {
@@ -117,6 +121,9 @@ fn spawn_tenant(exe: &std::path::Path, t: &Tenant) -> Result<Child> {
     }
     if let Some(v) = &t.secrets_file {
         cmd.arg("--secrets-file").arg(v);
+    }
+    for p in t.providers.iter().flatten() {
+        cmd.arg("--provider").arg(p);
     }
     let child = cmd
         .spawn()

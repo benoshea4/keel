@@ -1,8 +1,10 @@
-// main.rs — Task 1.1 (CLI, startup order) + Task 1.4 (recovery scan).
+// main.rs — Task 1.1: the CLI + serve() wiring for the keel binary. Since the
+// v2.2 crate split, everything journal-shaped lives in keel-core (../core);
+// Task 1.4's recovery scan runs inside keel_core::Engine::open.
 //
-// Startup order is load-bearing (SPEC.md Task 1.1): tracing → open DB + migrate →
-// RECOVERY SCAN → bind axum. Recovery must have issued its spawns before the
-// listener accepts requests.
+// Startup order is load-bearing (SPEC.md Task 1.1): tracing → Engine::open
+// (open DB + migrate + RECOVERY SCAN) → bind axum. Recovery must have issued
+// its spawns before the listener accepts requests.
 //
 // Shutdown: workflow threads are detached; abrupt exit at ANY point (kill -9
 // included) is safe because every effect commits to the journal before its result
@@ -13,18 +15,11 @@
 
 mod api;
 mod auth;
-mod cron;
-mod db;
 mod fleet;
-mod host;
-mod journal;
-mod notifier;
-mod runner;
 mod ui;
 
-use std::sync::Arc;
-
 use anyhow::Result;
+use keel_core::{cron, db, host, journal, runner};
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
@@ -82,6 +77,12 @@ enum Cmd {
         /// verifies against the live file). chmod 600 it.
         #[arg(long)]
         secrets_file: Option<String>,
+        /// v2.2 — register a capability provider: name=path.wasm (repeatable).
+        /// A provider is a component implementing the keel:provider world
+        /// (PROVIDERS.md); guests reach it via provider-call. Compiled and
+        /// type-checked at startup — a bad provider fails the boot.
+        #[arg(long = "provider", value_name = "NAME=PATH")]
+        providers: Vec<String>,
     },
     /// One-shot consistent snapshot of a (possibly live) database, then exit.
     Backup {
@@ -118,6 +119,7 @@ async fn main() -> Result<()> {
             backup_interval_secs,
             backup_keep,
             secrets_file,
+            providers,
         } => {
             serve(
                 db,
@@ -130,6 +132,7 @@ async fn main() -> Result<()> {
                 backup_interval_secs,
                 backup_keep,
                 secrets_file,
+                providers,
             )
             .await
         }
@@ -155,13 +158,11 @@ async fn serve(
     backup_interval_secs: u64,
     backup_keep: usize,
     secrets_file: Option<String>,
+    providers: Vec<String>,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
-
-    let conn = db::open_conn(&db_path)?;
-    db::migrate(&conn)?;
 
     if api_token.is_none() {
         tracing::warn!(
@@ -185,36 +186,29 @@ async fn serve(
             }
         }
     }
-    let shared = Arc::new(runner::EngineShared::new(
-        db_path.clone(),
-        max_running,
-        api_token,
-        max_guest_memory_mb.max(1) * 1024 * 1024,
-        secrets_file,
-    )?);
+    // v2.2 — load provider bytes here (the CLI owns paths); compile/type-check
+    // happens inside EngineShared::new — either way a bad provider fails boot.
+    let mut provider_bytes = Vec::new();
+    for spec in providers {
+        let (name, path) = spec
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--provider wants name=path.wasm, got '{spec}'"))?;
+        let wasm = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("--provider {name}: reading {path}: {e}"))?;
+        provider_bytes.push((name.to_string(), wasm));
+    }
 
-    // Task 1.4 — recovery scan. This IS the entire crash-recovery implementation:
-    // start every non-terminal workflow from the beginning; the journal turns
-    // re-execution into replay. There is no "replay mode" (SPEC.md §0 rule 2).
-    let resumable = db::resumable_ids(&conn)?;
-    // Task 2.7 starvation warning: parked workflows hold permits in this design,
-    // so a recovery that nearly fills the cap starves workflow N+1 of a thread
-    // until something finishes. (>80%, in integer math: n/max > 4/5.)
-    if resumable.len() as u64 * 5 > max_running.max(1) as u64 * 4 {
-        tracing::warn!(
-            "recovering {} workflows against --max-running {}: parked (sleeping/waiting) \
-             workflows still hold permits, so new or recovered workflows beyond the cap \
-             will starve. Parked OS threads are cheap — raise --max-running well above \
-             your workflow count.",
-            resumable.len(),
-            max_running
-        );
-    }
-    for id in resumable {
-        tracing::info!("recovering workflow {id}");
-        runner::spawn(shared.clone(), id); // sanctioned spawn call-site 2 of 4 (§0)
-    }
-    drop(conn); // startup connection is done; every thread opens its own
+    // v2.2 — Engine::open = open db + migrate + RECOVERY SCAN (Task 1.4: every
+    // non-terminal workflow starts again from its journal; there is no replay
+    // mode). The binary and embedders now share this startup path.
+    let mut opts = keel_core::EngineOptions::new(db_path.clone());
+    opts.max_running = max_running;
+    opts.api_token = api_token;
+    opts.max_guest_memory = max_guest_memory_mb.max(1) * 1024 * 1024;
+    opts.secrets_path = secrets_file;
+    opts.providers = provider_bytes;
+    let engine = keel_core::Engine::open(opts)?;
+    let shared = engine.shared();
 
     // v1.2 — the scheduler loop: every second, fire due schedules by creating
     // a workflow (born 'running' BEFORE spawn — same crash-safe ordering as

@@ -39,6 +39,7 @@ guest whose every effect replays.)
 | `await-event(name)` | yes | Parks until `POST /api/workflows/{id}/events` delivers a matching event; exactly-once. |
 | `checkpoint(state)` | yes | Snapshots state, prunes the journal below it, enables upgrade + fast recovery. |
 | `kv-set(key, value)` / `kv-get(key)` | yes | Durable per-workflow KV. Reads record what was seen; both are crash-atomic with their journal rows. |
+| `provider-call(name, kind, request)` | yes (`custom:<name>:<kind>`) | Call a capability provider registered on the engine (`--provider name=path.wasm` — see [PROVIDERS.md](../PROVIDERS.md)). Replay returns the recorded response without re-invoking. Unknown name/kind, traps and blown budgets are `err` (data). |
 | `log(msg)` | **no** | Engine log line. Replays re-log — duplicates after recovery are normal. |
 
 ## Sharp edges

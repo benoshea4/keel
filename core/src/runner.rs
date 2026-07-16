@@ -1,11 +1,14 @@
 // runner.rs — Task 1.3: one OS thread per active workflow + wasmtime setup.
 //
 // runner::spawn is called from EXACTLY four places, ever (SPEC.md §0 said
-// three; v1.2 added the scheduler as the one sanctioned amendment):
-//   1. workflow creation            (api.rs::create_workflow)
-//   2. the startup recovery scan    (main.rs::serve)
-//   3. step 5 of the phase-3 upgrade handler (api.rs::upgrade_workflow)
-//   4. the v1.2 scheduler loop      (main.rs::serve, interval schedules)
+// three; v1.2 added the scheduler as the one sanctioned amendment; the v2.2
+// crate split moved the first two into the lib façade without adding any):
+//   1. workflow creation            (lib.rs Engine::start_workflow — the
+//                                    binary's api.rs::create_workflow goes
+//                                    through it too)
+//   2. the startup recovery scan    (lib.rs Engine::open)
+//   3. step 5 of the phase-3 upgrade handler (engine/src/api.rs)
+//   4. the v1.2 scheduler loop      (engine/src/main.rs::serve)
 // Adding a fifth call-site is an architecture error — don't.
 //
 // Status transitions (SPEC.md §5): the TERMINAL ones (→ completed | failed) live
@@ -65,16 +68,21 @@ pub struct EngineShared {
     /// v2.1 — --secrets-file path for the secret host call. None = the call
     /// errs (guest-visible) with "no secrets file configured".
     pub secrets_path: Option<String>,
+    /// v2.2 — capability providers by name, compiled at startup (provider.rs).
+    /// Arc'd so each workflow Ctx can hold the map without re-locking.
+    pub providers: Arc<HashMap<String, Component>>,
 }
 
 impl EngineShared {
-    pub fn new(
-        db_path: String,
-        max_running: u32,
-        api_token: Option<String>,
-        max_guest_memory: usize,
-        secrets_path: Option<String>,
-    ) -> Result<Self> {
+    pub fn new(opts: crate::EngineOptions) -> Result<Self> {
+        let crate::EngineOptions {
+            db_path,
+            max_running,
+            api_token,
+            max_guest_memory,
+            secrets_path,
+            providers: provider_bytes,
+        } = opts;
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         // Post-review hardening: epoch interruption, so a guest stuck in pure
@@ -93,6 +101,25 @@ impl EngineShared {
                 engine.increment_epoch();
             });
         }
+        // v2.2 — compile + type-check every provider NOW: a provider that
+        // could never handle a call is a config error at startup, not a
+        // guest-visible mystery later.
+        let mut providers = HashMap::new();
+        for (name, wasm) in provider_bytes {
+            anyhow::ensure!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "provider name '{name}' must be non-empty [a-z0-9-]"
+            );
+            let component = crate::provider::preflight(&engine, &wasm)
+                .with_context(|| format!("provider '{name}'"))?;
+            anyhow::ensure!(
+                providers.insert(name.clone(), component).is_none(),
+                "duplicate provider name '{name}'"
+            );
+        }
         Ok(EngineShared {
             db_path,
             engine,
@@ -109,7 +136,13 @@ impl EngineShared {
             api_token,
             max_guest_memory,
             secrets_path,
+            providers: Arc::new(providers),
         })
+    }
+
+    /// The --max-running cap (lib.rs's recovery starvation warning reads it).
+    pub fn max_running(&self) -> u32 {
+        self.max_running
     }
 
     /// Task 3.6 — the upgrade handler takes a parked worker's JoinHandle to join
@@ -307,6 +340,9 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
             .build(),
         secrets_path: shared.secrets_path.clone(),
         read_secrets: Vec::new(),
+        engine: shared.engine.clone(),
+        providers: shared.providers.clone(),
+        max_guest_memory: shared.max_guest_memory,
     };
     let mut store = Store::new(&shared.engine, ctx);
     store.limiter(|c| &mut c.limits);

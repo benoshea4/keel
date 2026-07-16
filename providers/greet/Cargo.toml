@@ -1,0 +1,27 @@
+# Sample capability provider (v2.2) — the keel:provider world's hello-world.
+# Two kinds: "greet" ({"name"} → {"greeting"}) and "shout" (uppercase the
+# request). Import-free by construction (providers get NO ambient
+# capabilities); see PROVIDERS.md for the model and scripts/smoke_providers.sh
+# for the gate.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "greet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:greet-provider"
+
+[package.metadata.component.target]
+path = "../../provider-wit"
+world = "provider"

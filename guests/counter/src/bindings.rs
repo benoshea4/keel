@@ -242,7 +242,7 @@ pub mod keel {
                     };
                     let ptr8 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "http-request"]
                         fn wit_import9(
@@ -417,7 +417,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "secret"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -491,7 +491,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "http-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -549,7 +549,7 @@ pub mod keel {
             pub fn sleep_ms(ms: u64) -> () {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "sleep-ms"]
                         fn wit_import0(_: i64);
@@ -566,7 +566,7 @@ pub mod keel {
             pub fn now_ms() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "now-ms"]
                         fn wit_import0() -> i64;
@@ -584,7 +584,7 @@ pub mod keel {
             pub fn random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "random-u64"]
                         fn wit_import0() -> i64;
@@ -618,7 +618,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "await-event"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -650,7 +650,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "checkpoint"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -675,7 +675,7 @@ pub mod keel {
                     let ptr1 = vec1.as_ptr().cast::<u8>();
                     let len1 = vec1.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-set"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8, _: usize);
@@ -712,7 +712,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -749,6 +749,121 @@ pub mod keel {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
+            /// v2.2 — call a capability provider registered on the engine
+            /// (--provider name=path.wasm; a wasm component implementing the
+            /// keel:provider world — see PROVIDERS.md). Journaled as
+            /// custom:<name>:<kind>; replay returns the recorded response without
+            /// re-invoking the provider. Unknown name/kind, provider traps and blown
+            /// budgets come back as err (data). Secret values you read are redacted
+            /// from the journaled request, like http-request.
+            pub fn provider_call(
+                name: &str,
+                kind: &str,
+                request: &str,
+            ) -> Result<_rt::String, _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = name;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let vec1 = kind;
+                    let ptr1 = vec1.as_ptr().cast::<u8>();
+                    let len1 = vec1.len();
+                    let vec2 = request;
+                    let ptr2 = vec2.as_ptr().cast::<u8>();
+                    let len2 = vec2.len();
+                    let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
+                    unsafe extern "C" {
+                        #[link_name = "provider-call"]
+                        fn wit_import4(
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        );
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import4(
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe {
+                        wit_import4(
+                            ptr0.cast_mut(),
+                            len0,
+                            ptr1.cast_mut(),
+                            len1,
+                            ptr2.cast_mut(),
+                            len2,
+                            ptr3,
+                        )
+                    };
+                    let l5 = i32::from(*ptr3.add(0).cast::<u8>());
+                    let result12 = match l5 {
+                        0 => {
+                            let e = {
+                                let l6 = *ptr3
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l7 = *ptr3
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len8 = l7;
+                                let bytes8 = _rt::Vec::from_raw_parts(
+                                    l6.cast(),
+                                    len8,
+                                    len8,
+                                );
+                                _rt::string_lift(bytes8)
+                            };
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l9 = *ptr3
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l10 = *ptr3
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len11 = l10;
+                                let bytes11 = _rt::Vec::from_raw_parts(
+                                    l9.cast(),
+                                    len11,
+                                    len11,
+                                );
+                                _rt::string_lift(bytes11)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result12
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
             /// NOT journaled as an effect: forwarded to engine logs, tagged with the
             /// workflow id. Free to call; returns nothing; identical on replay by
             /// construction (log is simply not sequence-numbered at all — see SPEC.md §4.1).
@@ -758,7 +873,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.5.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.6.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -919,13 +1034,13 @@ macro_rules! __export_workflow_impl {
 pub(crate) use __export_workflow_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.5.0:workflow:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.6.0:workflow:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 622] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xef\x03\x01A\x02\x01\
-A\x08\x01B\x1d\x01o\x02ss\x01p\0\x01r\x03\x06status{\x07headers\x01\x04bodys\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 666] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9b\x04\x01A\x02\x01\
+A\x08\x01B\x1f\x01o\x02ss\x01p\0\x01r\x03\x06status{\x07headers\x01\x04bodys\x04\
 \0\x0dhttp-response\x03\0\x02\x01ks\x01j\x01\x03\x01s\x01@\x06\x06methods\x03url\
 s\x07headers\x01\x04body\x04\x0eretry-attemptsy\x0atimeout-msy\0\x05\x04\0\x0cht\
 tp-request\x01\x06\x01j\x01s\x01s\x01@\x01\x04names\0\x07\x04\0\x06secret\x01\x08\
@@ -933,12 +1048,13 @@ tp-request\x01\x06\x01j\x01s\x01s\x01@\x01\x04names\0\x07\x04\0\x06secret\x01\x0
 sleep-ms\x01\x0a\x01@\0\0w\x04\0\x06now-ms\x01\x0b\x04\0\x0arandom-u64\x01\x0b\x01\
 @\x01\x04names\0s\x04\0\x0bawait-event\x01\x0c\x01p}\x01@\x01\x05state\x0d\x01\0\
 \x04\0\x0acheckpoint\x01\x0e\x01@\x02\x03keys\x05values\x01\0\x04\0\x06kv-set\x01\
-\x0f\x01@\x01\x03keys\0\x04\x04\0\x06kv-get\x01\x10\x01@\x01\x03msgs\x01\0\x04\0\
-\x03log\x01\x11\x03\0\x1ckeel:workflow/host-api@0.5.0\x05\0\x01j\x01s\x01s\x01@\x01\
-\x05inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\x03\0\x01\x04\0\x06\
-resume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.5.0\x04\0\x0b\x0e\x01\0\x08work\
-flow\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\
-\x10wit-bindgen-rust\x060.41.0";
+\x0f\x01@\x01\x03keys\0\x04\x04\0\x06kv-get\x01\x10\x01@\x03\x04names\x04kinds\x07\
+requests\0\x07\x04\0\x0dprovider-call\x01\x11\x01@\x01\x03msgs\x01\0\x04\0\x03lo\
+g\x01\x12\x03\0\x1ckeel:workflow/host-api@0.6.0\x05\0\x01j\x01s\x01s\x01@\x01\x05\
+inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\x03\0\x01\x04\0\x06res\
+ume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.6.0\x04\0\x0b\x0e\x01\0\x08workflo\
+w\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10\
+wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

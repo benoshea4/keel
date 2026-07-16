@@ -8,8 +8,9 @@
 // 0.5.0 (v2.1) added secret + a timeout-ms parameter on http-request. The
 // http-request signature change means guests that call it must add the new
 // argument (0 = engine default) when rebuilding.
+// 0.6.0 (v2.2) added provider-call — a new import only; rebuild suffices.
 // Never edit an interface in place mid-phase.
-package keel:workflow@0.5.0;
+package keel:workflow@0.6.0;
 
 interface host-api {
     /// v1.2 — http-request's result. status is the raw code (2xx not special);
@@ -78,6 +79,15 @@ interface host-api {
 
     /// v1.2 — journaled read of this workflow's KV. `none` if never set.
     kv-get: func(key: string) -> option<string>;
+
+    /// v2.2 — call a capability provider registered on the engine
+    /// (--provider name=path.wasm; a wasm component implementing the
+    /// keel:provider world — see PROVIDERS.md). Journaled as
+    /// custom:<name>:<kind>; replay returns the recorded response without
+    /// re-invoking the provider. Unknown name/kind, provider traps and blown
+    /// budgets come back as err (data). Secret values you read are redacted
+    /// from the journaled request, like http-request.
+    provider-call: func(name: string, kind: string, request: string) -> result<string, string>;
 
     /// NOT journaled as an effect: forwarded to engine logs, tagged with the
     /// workflow id. Free to call; returns nothing; identical on replay by

@@ -26,7 +26,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use sha2::{Digest, Sha256};
 
-use crate::runner::EngineShared;
+use keel_core::runner::EngineShared;
 
 fn digest_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
