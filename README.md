@@ -9,7 +9,8 @@ going: [VISION.md](VISION.md) · [ROADMAP.md](ROADMAP.md).
 
 Docs: [operating Keel](docs/operations.md) (deploy, auth, secrets, backups/DR,
 fleet tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md) ·
-[capability providers](PROVIDERS.md).
+[capability providers](PROVIDERS.md) (pure sandboxes, or — since v2.5 —
+effectful connectors whose every wire call is journaled individually).
 
 **Embeddable, literally** (since v2.2 the engine is a library, `keel-core`,
 and the server is one consumer of it):
@@ -149,8 +150,9 @@ of it — e.g. Caddy: `your.domain { reverse_proxy 127.0.0.1:8080 }` — and tre
 the token like a root credential. Guests are additionally capped per workflow
 (`--max-guest-memory-mb`, default 256; plus the 1s epoch tick for cancel).
 
-Other non-goals (all phases): multi-node clustering, authentication, TLS, HTTP methods
-other than GET in the guest API, streaming bodies, physical linear-memory snapshots,
-WASI 0.3 async, metrics/OTel.
+Other non-goals: multi-node clustering, in-process TLS (terminate it in front),
+streaming request/response bodies, physical linear-memory snapshots, WASI 0.3
+async. (Earlier-phase non-goals that have since shipped: token auth v1.1,
+non-GET guest HTTP v1.2, metrics v1.2, OTel v2.4.)
 
 [wasmtime]: https://wasmtime.dev

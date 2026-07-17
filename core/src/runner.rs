@@ -70,7 +70,8 @@ pub struct EngineShared {
     pub secrets_path: Option<String>,
     /// v2.2 — capability providers by name, compiled at startup (provider.rs).
     /// Arc'd so each workflow Ctx can hold the map without re-locking.
-    pub providers: Arc<HashMap<String, Component>>,
+    /// v2.5 — entries carry the operator-granted tier (pure vs effectful).
+    pub providers: Arc<HashMap<String, crate::provider::ProviderEntry>>,
 }
 
 impl EngineShared {
@@ -82,6 +83,7 @@ impl EngineShared {
             max_guest_memory,
             secrets_path,
             providers: provider_bytes,
+            providers_effectful: provider_effectful_bytes,
         } = opts;
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
@@ -105,7 +107,15 @@ impl EngineShared {
         // could never handle a call is a config error at startup, not a
         // guest-visible mystery later.
         let mut providers = HashMap::new();
-        for (name, wasm) in provider_bytes {
+        let tiered = provider_bytes
+            .into_iter()
+            .map(|(n, w)| (n, w, false))
+            .chain(
+                provider_effectful_bytes
+                    .into_iter()
+                    .map(|(n, w)| (n, w, true)),
+            );
+        for (name, wasm, effectful) in tiered {
             anyhow::ensure!(
                 !name.is_empty()
                     && name
@@ -113,10 +123,25 @@ impl EngineShared {
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "provider name '{name}' must be non-empty [a-z0-9-]"
             );
-            let component = crate::provider::preflight(&engine, &wasm)
-                .with_context(|| format!("provider '{name}'"))?;
+            // v2.5 — per-tier pre-flight: the pure tier keeps its exact v2.2
+            // import-free guarantee; the effectful tier admits host-http (and
+            // pure components, which just don't use the grant).
+            let component = if effectful {
+                crate::provider::preflight_effectful(&engine, &wasm)
+            } else {
+                crate::provider::preflight(&engine, &wasm)
+            }
+            .with_context(|| format!("provider '{name}'"))?;
             anyhow::ensure!(
-                providers.insert(name.clone(), component).is_none(),
+                providers
+                    .insert(
+                        name.clone(),
+                        crate::provider::ProviderEntry {
+                            component,
+                            effectful
+                        }
+                    )
+                    .is_none(),
                 "duplicate provider name '{name}'"
             );
         }

@@ -17,6 +17,7 @@ definition of done) and runs in CI.
 | v2.2 | **Crate split**: `keel-core` library (open/recover, upload, start, inspect — the binary is one consumer); "embeddable" is now literal. **Capability providers** (WIT 0.6.0, [PROVIDERS.md](PROVIDERS.md)): import-free `keel:provider` components registered via `--provider name=path.wasm` (per-tenant in fleets), journaled as `custom:<name>:<kind>`, memory+CPU bounded, failures as data | `smoke_embedded.sh`, `smoke_providers.sh`, extended `smoke_fleet.sh` |
 | v2.3 | **KV versioning**: append-only `(workflow_id, key, seq, value)`; reads take the highest version, upgrades discard tail versions with the journal tail (the documented kv-vs-upgrade caveat is CLOSED), checkpoints compact superseded versions. **Idempotency keys**: `keel-idempotency-key: <workflow_id>:<seq>` on every http-request — wire-only (old journals replay untouched), stable across replay/re-send, guest-overridable, opt-out via empty value. No WIT bump | `smoke_kv_upgrade.sh`, extended `smoke_effects.sh` |
 | v2.4 | **Surface & scale polish**: schedules page (create/pause/resume/delete) + durable-KV section on the workflow page · linux-arm64 release binaries · OTel traces behind `--features otel` (span per workflow, child span per host call, OTLP/http; default binary unaffected) · `keel_active_permits` metric · deploy recipes (`docs/deploy/`: systemd, Docker/compose, single-replica k8s) | `load_test.sh` (200 workflows through a cap of 8: cap respected via the permit gauge, all complete, journals dense), extended `smoke_effects.sh` |
+| v2.5 | **Effectful providers** ([PROVIDERS.md](PROVIDERS.md), `keel:provider@0.2.0` — guest WIT untouched, no guest rebuilds): `--provider-effectful` grants a provider the `host-http` import; every provider wire call is journaled at its own seq (`provider-http:<name>`) inside the provider-call scope, so a crash mid-provider re-fires only the truly in-flight call, with the same idempotency key. Pure tier's import-free guarantee unchanged (and enforced against effectful components). Per-tenant `providers_effectful` in fleets | `smoke_providers_effectful.sh` |
 
 ## Answered design questions
 
@@ -38,10 +39,9 @@ definition of done) and runs in CI.
 One WIT bump per stage, never two. The v2.x program above is complete;
 what remains is demand-driven:
 
-- **Effectful providers** (PROVIDERS.md "Future"): an optional host-api
-  subset importable by providers, each effect journaled individually —
-  turns providers into full connectors. Needs a seq-allocation design pass.
 - **Content-addressed provider registry** — upload providers like modules.
+- **host-kv for providers** — durable provider-scoped state (needs a key
+  namespacing design; see PROVIDERS.md "Future").
 - **Native streaming replication** — only if a managed cloud gets built;
   Litestream covers off-box replication until then.
 

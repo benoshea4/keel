@@ -39,7 +39,7 @@ guest whose every effect replays.)
 | `await-event(name)` | yes | Parks until `POST /api/workflows/{id}/events` delivers a matching event; exactly-once. |
 | `checkpoint(state)` | yes | Snapshots state, prunes the journal below it, enables upgrade + fast recovery. |
 | `kv-set(key, value)` / `kv-get(key)` | yes | Durable per-workflow KV. Reads record what was seen; both are crash-atomic with their journal rows. Since v2.3 writes append *versions* tied to their journal seq, so an upgrade's tail-discard rolls values back with the tail; superseded versions are compacted at each checkpoint. |
-| `provider-call(name, kind, request)` | yes (`custom:<name>:<kind>`) | Call a capability provider registered on the engine (`--provider name=path.wasm` — see [PROVIDERS.md](../PROVIDERS.md)). Replay returns the recorded response without re-invoking. Unknown name/kind, traps and blown budgets are `err` (data). |
+| `provider-call(name, kind, request)` | yes (`custom:<name>:<kind>`) | Call a capability provider registered on the engine (see [PROVIDERS.md](../PROVIDERS.md)). Replay returns the recorded response without re-invoking. Unknown name/kind, traps and blown budgets are `err` (data). v2.5: EFFECTFUL providers (`--provider-effectful`) additionally journal each of their wire calls at its own seq (`provider-http:<name>`), so a crash mid-provider re-fires only the truly in-flight call — with the same `keel-idempotency-key`. No guest-side change. |
 | `log(msg)` | **no** | Engine log line. Replays re-log — duplicates after recovery are normal. |
 
 ## Sharp edges

@@ -63,6 +63,8 @@ jobs:
         run: ./scripts/smoke_embedded.sh
       - name: Capability providers smoke (v2.2)
         run: ./scripts/smoke_providers.sh
+      - name: Effectful providers smoke (v2.5)
+        run: ./scripts/smoke_providers_effectful.sh
       - name: KV-versioning upgrade smoke (v2.3)
         run: ./scripts/smoke_kv_upgrade.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)

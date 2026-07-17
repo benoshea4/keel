@@ -57,8 +57,9 @@ pub struct Ctx {
     /// v2.2 — the process-wide wasmtime Engine (Arc-backed clone): provider
     /// calls build their own short-lived Store on it.
     pub engine: wasmtime::Engine,
-    /// v2.2 — compiled capability providers by name (see provider.rs).
-    pub providers: Arc<std::collections::HashMap<String, wasmtime::component::Component>>,
+    /// v2.2 — compiled capability providers by name (see provider.rs);
+    /// v2.5 — each entry carries the tier the operator granted it.
+    pub providers: Arc<std::collections::HashMap<String, crate::provider::ProviderEntry>>,
     /// v2.2 — provider calls reuse the per-guest memory cap.
     pub max_guest_memory: usize,
 }
@@ -431,28 +432,117 @@ impl keel::workflow::host_api::Host for Ctx {
         let engine = self.engine.clone();
         let providers = self.providers.clone();
         let max_mem = self.max_guest_memory;
-        let r = self
-            .j
-            .journaled(&jkind, &jreq, move || {
-                Ok(match providers.get(&name) {
-                    None => Resp::Err {
-                        err: format!("no provider '{name}' registered on this engine"),
-                    },
-                    Some(component) => {
-                        tracing::info!("invoking provider {name} kind {kind}");
-                        match crate::provider::call(&engine, component, max_mem, &kind, &request)
-                        {
-                            Ok(ok) => Resp::Ok { ok },
-                            Err(err) => Resp::Err { err },
-                        }
-                    }
+        // v2.5 — dispatch on the registered TIER. The None and pure arms
+        // journal exactly as v2.2 did (one row, same kind/request bytes), so
+        // pre-v2.5 journals replay unchanged. Tier is looked up before the
+        // journaled() call, but replay stays tier-independent: a recorded row
+        // is returned without touching the provider in all three arms (the
+        // effectful arm's scan consumes the whole recorded scope).
+        match providers.get(&name) {
+            None => {
+                let r = self
+                    .j
+                    .journaled(&jkind, &jreq, move || {
+                        Ok(Resp::Err {
+                            err: format!("no provider '{name}' registered on this engine"),
+                        })
+                    })
+                    .map_err(trap)?;
+                Ok(match r {
+                    Resp::Ok { ok } => Ok(ok),
+                    Resp::Err { err } => Err(err),
                 })
-            })
-            .map_err(trap)?;
-        Ok(match r {
-            Resp::Ok { ok } => Ok(ok),
-            Resp::Err { err } => Err(err),
-        })
+            }
+            Some(entry) if !entry.effectful => {
+                let component = entry.component.clone();
+                let r = self
+                    .j
+                    .journaled(&jkind, &jreq, move || {
+                        tracing::info!("invoking provider {name} kind {kind}");
+                        Ok(
+                            match crate::provider::call(&engine, &component, max_mem, &kind, &request)
+                            {
+                                Ok(ok) => Resp::Ok { ok },
+                                Err(err) => Resp::Err { err },
+                            },
+                        )
+                    })
+                    .map_err(trap)?;
+                Ok(match r {
+                    Resp::Ok { ok } => Ok(ok),
+                    Resp::Err { err } => Err(err),
+                })
+            }
+            Some(entry) => {
+                // Effectful: the provider scope may span several journal rows
+                // (its wire calls at seqs N.., then the terminal custom: row).
+                // First try to consume a COMPLETED recorded scope without
+                // instantiating the provider at all.
+                let jreq_json = serde_json::to_string(&jreq).map_err(|e| trap(e.into()))?;
+                let inner_kind = format!("provider-http:{name}");
+                match scan_provider_scope(
+                    &self.j.db,
+                    &self.j.workflow_id,
+                    self.j.next_seq,
+                    &jkind,
+                    &inner_kind,
+                    &jreq_json,
+                )
+                .map_err(trap)?
+                {
+                    ScanOutcome::Complete { next_seq, response } => {
+                        self.j.next_seq = next_seq;
+                        let r: Resp =
+                            serde_json::from_str(&response).map_err(|e| trap(e.into()))?;
+                        Ok(match r {
+                            Resp::Ok { ok } => Ok(ok),
+                            Resp::Err { err } => Err(err),
+                        })
+                    }
+                    ScanOutcome::Live => {
+                        // Fresh, or a crash left internal rows without a
+                        // terminal: re-invoke live. Recorded wire calls replay
+                        // inside the nested journaled() (never re-fired); new
+                        // ones execute and commit at their own seqs.
+                        tracing::info!("invoking provider {name} kind {kind}");
+                        let nested = crate::journal::JournalCtx {
+                            workflow_id: self.j.workflow_id.clone(),
+                            db: db::open_conn(&self.db_path).map_err(trap)?,
+                            next_seq: self.j.next_seq,
+                        };
+                        let (final_seq, outcome) = crate::provider::call_effectful(
+                            &engine,
+                            &entry.component,
+                            max_mem,
+                            &name,
+                            &kind,
+                            &request,
+                            nested,
+                            self.read_secrets.clone(),
+                            self.http.clone(),
+                        );
+                        self.j.next_seq = final_seq;
+                        // Workflow-fatal (journal integrity inside the
+                        // provider) propagates as a trap; provider-level
+                        // failures are DATA, journaled in the terminal row.
+                        let r = outcome.map_err(trap)?;
+                        let resp = self
+                            .j
+                            .journaled(&jkind, &jreq, move || {
+                                Ok(match r {
+                                    Ok(ok) => Resp::Ok { ok },
+                                    Err(err) => Resp::Err { err },
+                                })
+                            })
+                            .map_err(trap)?;
+                        Ok(match resp {
+                            Resp::Ok { ok } => Ok(ok),
+                            Resp::Err { err } => Err(err),
+                        })
+                    }
+                }
+            }
+        }
     }
 
     fn sleep_ms(&mut self, ms: u64) -> wasmtime::Result<()> {
@@ -648,13 +738,72 @@ impl keel::workflow::host_api::Host for Ctx {
 /// journaled() closure, so however many attempts happen here, exactly ONE journal
 /// row records the final outcome — replay sees a single result.
 /// (status, headers, 1 MiB-capped utf-8 body) — http-request's live-path output.
-type HttpOut = (u16, Vec<(String, String)>, String);
+pub(crate) type HttpOut = (u16, Vec<(String, String)>, String);
 
 /// v1.2 — live path of http-request. Returns (status, headers, body) for ANY
 /// HTTP status; only transport-level failures (and body reads that die) are
 /// Err. `retry_attempts` EXTRA tries apply to transport errors and 5xx — a 5xx
 /// on the final try comes back as data, since a response is a response.
-fn do_http_request(
+/// v2.5 — what the effectful provider-call replay scan concluded about the
+/// journal from the current cursor onward.
+#[derive(Debug)]
+pub(crate) enum ScanOutcome {
+    /// A completed recorded scope: consume through the terminal row (cursor
+    /// moves to `next_seq`) and return the terminal's recorded response —
+    /// the provider is NOT instantiated.
+    Complete { next_seq: i64, response: String },
+    /// No terminal row (fresh call, or a crash mid-provider left only
+    /// internal rows): invoke the provider live; recorded internals replay
+    /// inside the nested journaled().
+    Live,
+}
+
+/// Walk the journal from `start`: rows of `inner_kind` (this provider's wire
+/// calls) belong to the scope; the first `jkind` row is the terminal and must
+/// carry the same request the live guest just produced (the journaled()
+/// nondeterminism rule, applied at scope granularity). ANY other kind means
+/// the guest has diverged from its journal.
+pub(crate) fn scan_provider_scope(
+    db: &rusqlite::Connection,
+    workflow_id: &str,
+    start: i64,
+    jkind: &str,
+    inner_kind: &str,
+    jreq_json: &str,
+) -> anyhow::Result<ScanOutcome> {
+    let mut s = start;
+    loop {
+        match db::get_journal_row(db, workflow_id, s)? {
+            None => return Ok(ScanOutcome::Live),
+            Some((rkind, rreq, rresp)) => {
+                if rkind == jkind {
+                    if rreq != jreq_json {
+                        anyhow::bail!(
+                            "nondeterministic replay at seq {s}: recorded ({rkind}, {rreq}) \
+                             but live code produced ({jkind}, {jreq_json}). The workflow code \
+                             has diverged from its journal."
+                        );
+                    }
+                    return Ok(ScanOutcome::Complete {
+                        next_seq: s + 1,
+                        response: rresp,
+                    });
+                } else if rkind == inner_kind {
+                    s += 1;
+                } else {
+                    anyhow::bail!(
+                        "nondeterministic replay at seq {s}: recorded ({rkind}, {rreq}) inside \
+                         the provider scope that started at seq {start}, but live code produced \
+                         a provider-call ({jkind}, {jreq_json}). The workflow code has diverged \
+                         from its journal."
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn do_http_request(
     agent: &ureq::Agent,
     method: &str,
     url: &str,
@@ -732,7 +881,7 @@ fn read_response(resp: ureq::Response) -> Result<HttpOut, String> {
 /// stable across replay AND across the crash-and-resend window (recovery
 /// re-executes the same seq → same key → the remote can dedupe). The guest
 /// passing the header itself wins; an EMPTY value means "send no key at all".
-fn inject_idempotency_key(
+pub(crate) fn inject_idempotency_key(
     mut headers: Vec<(String, String)>,
     workflow_id: &str,
     seq: i64,
@@ -815,7 +964,7 @@ fn lookup_secret(path: Option<&str>, name: &str) -> Result<String, String> {
 /// applied to journaled request fields only, never to what goes on the wire.
 /// Longest value first so a secret containing another is replaced whole;
 /// empty values never match (they would "occur" everywhere).
-fn redact(s: &str, secrets: &[(String, String)]) -> String {
+pub(crate) fn redact(s: &str, secrets: &[(String, String)]) -> String {
     if secrets.is_empty() {
         return s.to_string();
     }
@@ -938,5 +1087,87 @@ mod tests {
         ];
         // The longer secret wins where they overlap; the empty one never fires.
         assert_eq!(redact("xx abcdef yy abc", &secrets), "xx {{secret:long}} yy {{secret:short}}");
+    }
+
+    // --- v2.5: the effectful provider-call replay scan -----------------------
+
+    fn scan_db() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&c).unwrap();
+        crate::db::insert_module(&c, "h", "m", b"\0asm").unwrap();
+        crate::db::create_workflow(&c, "w", "h", "{}").unwrap();
+        c
+    }
+
+    fn put_row(c: &rusqlite::Connection, seq: i64, kind: &str, req: &str, resp: &str) {
+        c.execute(
+            "INSERT INTO journal (workflow_id, seq, kind, request, response, created_at)
+             VALUES ('w', ?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![seq, kind, req, resp],
+        )
+        .unwrap();
+    }
+
+    const JK: &str = "custom:relay:relay";
+    const IK: &str = "provider-http:relay";
+    const RQ: &str = r#"{"request":"{}"}"#;
+
+    #[test]
+    fn scan_empty_and_internals_only_mean_live() {
+        let c = scan_db();
+        assert!(matches!(
+            scan_provider_scope(&c, "w", 0, JK, IK, RQ).unwrap(),
+            ScanOutcome::Live
+        ));
+        // A crash mid-provider leaves internals without a terminal.
+        put_row(&c, 0, IK, "{}", "{}");
+        put_row(&c, 1, IK, "{}", "{}");
+        assert!(matches!(
+            scan_provider_scope(&c, "w", 0, JK, IK, RQ).unwrap(),
+            ScanOutcome::Live
+        ));
+    }
+
+    #[test]
+    fn scan_consumes_a_completed_scope_through_its_terminal() {
+        let c = scan_db();
+        put_row(&c, 0, IK, "{}", "{}");
+        put_row(&c, 1, IK, "{}", "{}");
+        put_row(&c, 2, JK, RQ, r#"{"ok":"done"}"#);
+        match scan_provider_scope(&c, "w", 0, JK, IK, RQ).unwrap() {
+            ScanOutcome::Complete { next_seq, response } => {
+                assert_eq!(next_seq, 3);
+                assert_eq!(response, r#"{"ok":"done"}"#);
+            }
+            ScanOutcome::Live => panic!("expected Complete"),
+        }
+        // Zero internals (a pure component under the effectful grant).
+        put_row(&c, 3, JK, RQ, r#"{"ok":"pure"}"#);
+        match scan_provider_scope(&c, "w", 3, JK, IK, RQ).unwrap() {
+            ScanOutcome::Complete { next_seq, response } => {
+                assert_eq!((next_seq, response.as_str()), (4, r#"{"ok":"pure"}"#));
+            }
+            ScanOutcome::Live => panic!("expected Complete"),
+        }
+    }
+
+    #[test]
+    fn scan_diverged_journal_is_nondeterminism() {
+        let c = scan_db();
+        // A foreign kind where the provider-call should be.
+        put_row(&c, 0, "http-request", "{}", "{}");
+        let e = scan_provider_scope(&c, "w", 0, JK, IK, RQ).unwrap_err();
+        assert!(e.to_string().contains("nondeterministic replay"), "got: {e}");
+        // A terminal whose request differs from what live code produced.
+        let c = scan_db();
+        put_row(&c, 0, JK, r#"{"request":"other"}"#, "{}");
+        let e = scan_provider_scope(&c, "w", 0, JK, IK, RQ).unwrap_err();
+        assert!(e.to_string().contains("nondeterministic replay"), "got: {e}");
+        // A foreign kind after internals (guest or provider diverged mid-scope).
+        let c = scan_db();
+        put_row(&c, 0, IK, "{}", "{}");
+        put_row(&c, 1, "sleep", "{}", "{}");
+        let e = scan_provider_scope(&c, "w", 0, JK, IK, RQ).unwrap_err();
+        assert!(e.to_string().contains("nondeterministic replay"), "got: {e}");
     }
 }

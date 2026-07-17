@@ -19,7 +19,8 @@ Flags that matter in production:
 | `--retain-terminal-hours` | 0 (keep forever) | GC completed/failed workflows (journal, events, snapshots, kv included) after this many hours. |
 | `--backup-dir` + `--backup-interval-secs` + `--backup-keep` | off / 300 / 24 | Periodic online snapshots (below). |
 | `--secrets-file` | unset | KEY=VALUE file backing the `secret` host call (below). |
-| `--provider name=path.wasm` | none | Register a capability provider (repeatable) — see [PROVIDERS.md](../PROVIDERS.md). Compiled + type-checked at boot; a bad provider fails the start. |
+| `--provider name=path.wasm` | none | Register a PURE capability provider (repeatable) — see [PROVIDERS.md](../PROVIDERS.md). Import-free, enforced. Compiled + type-checked at boot; a bad provider fails the start. |
+| `--provider-effectful name=path.wasm` | none | v2.5 — register an EFFECTFUL provider (repeatable): may import `keel:provider/host-http` and make real HTTP calls, each journaled individually. The grant means the provider can reach any URL this host can — an operator decision, same trust class as the guest `http-get` surface. |
 
 ## Exposing it
 
@@ -112,6 +113,7 @@ api_token = "..."      # per-tenant root credential
 # retain_terminal_hours, backup_dir, backup_interval_secs, backup_keep,
 # secrets_file (per-tenant secrets — cells never share one),
 # providers = ["name=path.wasm", ...] (per-tenant capability providers)
+# providers_effectful = ["name=path.wasm", ...] (v2.5 — per-tenant effectful grants)
 
 [[tenants]]
 name = "globex"

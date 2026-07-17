@@ -1,0 +1,27 @@
+# v2.5 acceptance guest — exercises an EFFECTFUL provider end to end: one
+# provider-call to the relay provider (which makes two journaled wire POSTs),
+# then a durable sleep (the post-completion crash window). Built against the
+# UNCHANGED keel:workflow@0.6.0 world — effectful providers need no guest-side
+# WIT change at all.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "relay-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:relay-guest"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "workflow"

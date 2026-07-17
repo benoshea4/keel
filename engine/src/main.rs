@@ -83,6 +83,12 @@ enum Cmd {
         /// type-checked at startup — a bad provider fails the boot.
         #[arg(long = "provider", value_name = "NAME=PATH")]
         providers: Vec<String>,
+        /// v2.5 — register an EFFECTFUL capability provider (repeatable): may
+        /// import keel:provider/host-http and make real HTTP calls, each
+        /// journaled individually (PROVIDERS.md). Granting this tier means the
+        /// provider can reach any URL this host can — an operator decision.
+        #[arg(long = "provider-effectful", value_name = "NAME=PATH")]
+        providers_effectful: Vec<String>,
     },
     /// One-shot consistent snapshot of a (possibly live) database, then exit.
     Backup {
@@ -162,6 +168,7 @@ async fn main() -> Result<()> {
             backup_keep,
             secrets_file,
             providers,
+            providers_effectful,
         } => {
             serve(
                 db,
@@ -175,6 +182,7 @@ async fn main() -> Result<()> {
                 backup_keep,
                 secrets_file,
                 providers,
+                providers_effectful,
             )
             .await
         }
@@ -201,6 +209,7 @@ async fn serve(
     backup_keep: usize,
     secrets_file: Option<String>,
     providers: Vec<String>,
+    providers_effectful: Vec<String>,
 ) -> Result<()> {
     init_tracing()?;
 
@@ -228,15 +237,21 @@ async fn serve(
     }
     // v2.2 — load provider bytes here (the CLI owns paths); compile/type-check
     // happens inside EngineShared::new — either way a bad provider fails boot.
-    let mut provider_bytes = Vec::new();
-    for spec in providers {
-        let (name, path) = spec
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--provider wants name=path.wasm, got '{spec}'"))?;
-        let wasm = std::fs::read(path)
-            .map_err(|e| anyhow::anyhow!("--provider {name}: reading {path}: {e}"))?;
-        provider_bytes.push((name.to_string(), wasm));
-    }
+    let read_provider_specs = |specs: Vec<String>, flag: &str| -> Result<Vec<(String, Vec<u8>)>> {
+        let mut out = Vec::new();
+        for spec in specs {
+            let (name, path) = spec
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("{flag} wants name=path.wasm, got '{spec}'"))?;
+            let wasm = std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("{flag} {name}: reading {path}: {e}"))?;
+            out.push((name.to_string(), wasm));
+        }
+        Ok(out)
+    };
+    let provider_bytes = read_provider_specs(providers, "--provider")?;
+    let provider_effectful_bytes =
+        read_provider_specs(providers_effectful, "--provider-effectful")?;
 
     // v2.2 — Engine::open = open db + migrate + RECOVERY SCAN (Task 1.4: every
     // non-terminal workflow starts again from its journal; there is no replay
@@ -247,6 +262,7 @@ async fn serve(
     opts.max_guest_memory = max_guest_memory_mb.max(1) * 1024 * 1024;
     opts.secrets_path = secrets_file;
     opts.providers = provider_bytes;
+    opts.providers_effectful = provider_effectful_bytes;
     let engine = keel_core::Engine::open(opts)?;
     let shared = engine.shared();
 

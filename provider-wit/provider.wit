@@ -1,19 +1,69 @@
-// The contract for capability providers (v2.2) — design doc: PROVIDERS.md.
+// The contract for capability providers (v2.2, effectful tier v2.5) — design
+// doc: PROVIDERS.md.
 //
 // A provider extends Keel's effect surface WITHOUT touching engine code: the
 // engine journals around handle() (kind `custom:<name>:<kind>`), so provider
-// results replay like any built-in effect. Providers import NOTHING — no
-// clocks, no sockets, not even host-api. Same zero-ambient-capability rule as
-// guests, only stricter: a provider is a pure request→response sandbox.
+// results replay like any built-in effect. Two tiers, chosen by the OPERATOR
+// at registration time:
+//
+//   * `world provider` (--provider): imports NOTHING — no clocks, no sockets,
+//     not even host-http. A pure request→response sandbox, unchanged since
+//     v2.2. Components built against 0.1.0 keep working verbatim.
+//   * `world provider-effectful` (--provider-effectful): may import host-http
+//     and make real HTTP calls. Each wire call is journaled INDIVIDUALLY by
+//     the engine (kind `provider-http:<name>`) inside the enclosing
+//     provider-call's journal scope, so a crash mid-provider resumes without
+//     re-firing wire effects that already committed. See PROVIDERS.md.
 //
 // This package is versioned independently of keel:workflow — bumping one
 // never forces rebuilding the other side's components.
-package keel:provider@0.1.0;
+//
+// Version history:
+//   0.1.0 (v2.2) — world provider: export handle, no imports.
+//   0.2.0 (v2.5) — ADD world provider-effectful (handle + import host-http).
+//                  world provider is textually unchanged: pure providers do
+//                  not need a rebuild.
+package keel:provider@0.2.0;
+
+/// The host capability an EFFECTFUL provider may import. Semantics mirror the
+/// guest-side http-request exactly (same journaling rules, same idempotency
+/// key `<workflow-id>:<seq>` injected on the wire, same redaction of the
+/// journaled request, same retry/timeout behavior) — a provider's wire call
+/// is journaled at ITS OWN seq inside the calling workflow's journal.
+interface host-http {
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    /// ok = the response, whatever the status (non-2xx is data);
+    /// err = transport failure after retries. retry-attempts is capped at 8
+    /// by the host; timeout-ms 0 means the host default (30s).
+    http-request: func(
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<string>,
+        retry-attempts: u32,
+        timeout-ms: u32,
+    ) -> result<http-response, string>;
+}
 
 world provider {
     /// kind: which operation (one provider may serve several);
     /// request: JSON text, opaque to the engine.
     /// ok = JSON response text (journaled verbatim); err = message handed to
     /// the calling guest as a guest-visible error (data, not a trap).
+    export handle: func(kind: string, request: string) -> result<string, string>;
+}
+
+world provider-effectful {
+    import host-http;
+
+    /// Same contract as world provider's handle. A provider whose handle
+    /// depends only on (kind, request, responses-to-its-imports) replays
+    /// deterministically; anything else trips the same nondeterminism trap
+    /// guests get.
     export handle: func(kind: string, request: string) -> result<string, string>;
 }

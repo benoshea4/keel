@@ -21,6 +21,7 @@
 //   # optional: max_running, max_guest_memory_mb, retain_terminal_hours,
 //   #           backup_dir, backup_interval_secs, backup_keep, secrets_file,
 //   #           providers = ["name=path.wasm", ...]
+//   #           providers_effectful = ["name=path.wasm", ...]   (v2.5)
 
 use std::collections::HashSet;
 use std::process::{Child, Command, Stdio};
@@ -49,6 +50,9 @@ struct Tenant {
     /// v2.2 — capability providers, "name=path.wasm" each (repeated
     /// --provider args on the child; the child's boot validates them).
     providers: Option<Vec<String>>,
+    /// v2.5 — EFFECTFUL providers (repeated --provider-effectful args):
+    /// per-tenant grants, like everything else in a cell.
+    providers_effectful: Option<Vec<String>>,
 }
 
 fn validate(cfg: &FleetConfig) -> Result<()> {
@@ -124,6 +128,9 @@ fn spawn_tenant(exe: &std::path::Path, t: &Tenant) -> Result<Child> {
     }
     for p in t.providers.iter().flatten() {
         cmd.arg("--provider").arg(p);
+    }
+    for p in t.providers_effectful.iter().flatten() {
+        cmd.arg("--provider-effectful").arg(p);
     }
     let child = cmd
         .spawn()

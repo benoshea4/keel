@@ -1,0 +1,28 @@
+# Sample EFFECTFUL capability provider (v2.5) — the provider-effectful
+# world's hello-world. One kind: "relay" ({"first_url","second_url","body"})
+# — POSTs body to first_url, then to second_url, via the imported host-http.
+# Each POST is journaled INDIVIDUALLY by the engine, so a crash between the
+# two re-fires only the one that had not committed; see PROVIDERS.md and
+# scripts/smoke_providers_effectful.sh for the gate.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:relay-provider"
+
+[package.metadata.component.target]
+path = "../../provider-wit"
+world = "provider-effectful"

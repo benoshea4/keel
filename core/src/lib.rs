@@ -41,7 +41,13 @@ pub struct EngineOptions {
     /// KEY=VALUE file backing the `secret` host call.
     pub secrets_path: Option<String>,
     /// Capability providers: (name, component bytes) — see provider.rs.
+    /// PURE tier: must be import-free (the v2.2 guarantee, still enforced).
     pub providers: Vec<(String, Vec<u8>)>,
+    /// v2.5 — EFFECTFUL tier: may import keel:provider/host-http and make
+    /// real HTTP calls, each journaled individually (PROVIDERS.md). Granting
+    /// a provider this tier is an operator decision — names share one
+    /// namespace with `providers`.
+    pub providers_effectful: Vec<(String, Vec<u8>)>,
 }
 
 impl EngineOptions {
@@ -53,6 +59,7 @@ impl EngineOptions {
             api_token: None,
             secrets_path: None,
             providers: Vec::new(),
+            providers_effectful: Vec::new(),
         }
     }
 }

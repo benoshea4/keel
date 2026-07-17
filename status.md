@@ -43,6 +43,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_providers.sh                        # must print PROVIDERS SMOKE PASS (v2.2)
 ./scripts/smoke_kv_upgrade.sh                       # must print KV-UPGRADE SMOKE PASS (v2.3)
 ./scripts/load_test.sh                              # must print LOAD TEST PASS (v2.4, 200 wf / cap 8)
+./scripts/smoke_providers_effectful.sh              # must print EFFECTFUL PROVIDERS SMOKE PASS (v2.5)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -384,6 +385,75 @@ K. *(v2.4, 2026-07-16 — surface & scale polish; NO WIT bump)*
      compose.yml, single-replica k8s (replicas MUST stay 1 per db; Recreate
      strategy; scale = more cells).
 
+L. *(v2.5, 2026-07-17 — EFFECTFUL providers; keel:provider 0.2.0, guest WIT
+   untouched — no guest rebuilds)*
+   - **The seq-allocation design** (the open problem PROVIDERS.md v2.2 flagged):
+     an effectful provider's wire calls journal as ORDINARY rows (kind
+     `provider-http:<name>`) at the calling workflow's own dense seqs, through
+     a NESTED OWNED JournalCtx — fresh Connection to the same db, cursor
+     copied in from Ctx.j.next_seq and copied back out after the call. Safe
+     because the guest is suspended inside provider-call for the whole
+     duration (the two connections never write concurrently). The
+     `custom:<name>:<kind>` terminal row commits LAST, at the seq after the
+     internals. Dense-seq, commit-before-return and no-replay-mode all hold
+     per wire call; journaled()'s nondeterminism trap now reaches INSIDE
+     providers for free.
+   - **Replay** (host.rs scan_provider_scope, unit-tested): from the cursor,
+     rows of `provider-http:<name>` belong to the scope; the first
+     `custom:<name>:<kind>` row is the terminal → fast-forward past the whole
+     scope WITHOUT instantiating the provider (request compared like
+     journaled() does). No terminal (crash mid-provider) → re-invoke live:
+     recorded wire calls replay inside the nested journaled() (never
+     re-fired), the in-flight one re-sends with the SAME wfid:seq idempotency
+     key — each wire call has its own seq, so v2.3's key mechanism composed
+     with zero new code. Any foreign kind in the scope → nondeterminism bail.
+   - **Tier is an operator grant**: --provider keeps the v2.2 import-free
+     preflight verbatim (effectful components REJECTED at boot);
+     --provider-effectful preflights against a linker exporting exactly
+     keel:provider/host-http (pure components pass — grant ⊇ use). One name
+     namespace, dup-checked across tiers. Fleet: per-tenant
+     providers_effectful. ProviderEntry{component, effectful} in EngineShared.
+   - **Failure taxonomy exception (deliberate)**: provider failures stay DATA
+     (trap/budget/instantiation/transport → journaled err), but a
+     journal-integrity failure INSIDE an import (nondeterministic provider
+     re-run, db error) must fail the WORKFLOW — EffCtx carries it out in a
+     `fatal` slot (the wasm trap is just the vehicle) and call_effectful
+     returns it as the OUTER error, which host.rs traps the guest with.
+     Laundering nondeterminism into a journaled err would corrupt silently.
+   - **Epoch budget rethink**: pure providers keep set_epoch_deadline(10), no
+     callback. Effectful stores set deadline 1 + a callback, because epoch
+     ticks accumulate during a slow wire call and would charge WALL time
+     against the wasm budget (an 11s POST would trap the provider on the next
+     wasm instruction). The callback excuses exactly one firing per completed
+     host call (EffCtx.returned_from_host, set after journaled() returns) and
+     counts the rest — ~10 ticks of pure-wasm spin budget, wire time bounded
+     by http timeout/retry caps instead. The gate's 11s /hook/b resend proves
+     the excusal works.
+   - **WIT**: keel:provider 0.2.0 = old `world provider` TEXTUALLY UNCHANGED
+     (0.1.0-built pure providers keep working — export types are checked
+     structurally, not by version string) + new `world provider-effectful`
+     (import host-http: http-request mirroring the guest signature
+     field-for-field). Second bindgen! in provider.rs (imports default
+     trappable). keel:workflow stays 0.6.0 — provider-call is unchanged, so
+     NO guest rebuilds; v2.5 is a drop-in engine swap.
+   - **Redaction reach**: the provider's journaled wire requests redact with
+     the CALLING execution's read_secrets (cloned into EffCtx) — a secret the
+     guest passed into a provider request cannot leak raw through the
+     provider's rows either.
+   - **Samples + gate**: providers/relay (POST first_url then second_url via
+     the import), guests/relay (one provider-call + 5s sleep).
+     smoke_providers_effectful.sh proves: effectful-under---provider boot
+     REFUSAL; kill -9 mid-second-POST → /hook/a hit ONCE, /hook/b hit twice
+     with the SAME key both times (stub now records per-path hits+keys at
+     ARRIVAL, /hits endpoint), "invoking provider" == 2 (per-effect journaling
+     re-invokes after a mid-scope crash — boundary journaling would show 1);
+     kill -9 post-scope → fast-forward, count stays put; pure greet under the
+     effectful grant → works, zero internals. Journals dense throughout.
+   - **Sharp edges documented** (PROVIDERS.md rules): don't change a
+     provider's tier mid-workflow (effectful history under a pure grant trips
+     the nondeterminism trap); cancel latency window = sum of the provider's
+     wire timeouts; provider responses journal verbatim (don't echo secrets).
+
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant
    locking on the exit path and Permit::drop). Two indexes (events park-loop
@@ -412,8 +482,9 @@ keel/
 ├── core/                    keel-core LIBRARY (v2.2 split): db/journal/notifier/host/
 │                            runner/cron/provider + the Engine façade (lib.rs), the
 │                            embedded gate (tests/embedded.rs, examples/embedded.rs)
-├── provider-wit/            keel:provider world (capability providers — PROVIDERS.md)
-├── providers/greet/         sample provider component (smoke_providers.sh)
+├── provider-wit/            keel:provider worlds — pure + effectful (PROVIDERS.md)
+├── providers/greet/         sample PURE provider component (smoke_providers.sh)
+├── providers/relay/         sample EFFECTFUL provider (smoke_providers_effectful.sh, v2.5)
 ├── SPEC.md                  the build spec — THE source of truth
 ├── status.md                this file
 ├── README.md                quick start + cancel/tests/security sections (the spec's verbatim
