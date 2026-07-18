@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — providers</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Providers</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  <h2>Upload provider</h2>
+  {# Normal multipart form post — api::upload_provider pre-flights the component
+     for the chosen tier at the door (v2.6, PROVIDERS.md). The swap is LIVE:
+     the next provider-call under this name uses the new component. #}
+  <form action="/api/providers" method="post" enctype="multipart/form-data">
+    <label for="name">Name ([a-z0-9-])</label>
+    <input id="name" name="name" placeholder="greet" required>
+    <label for="tier">Tier (an operator grant — effectful may call out over HTTP)</label>
+    <select id="tier" name="tier">
+      <option value="pure">pure</option>
+      <option value="effectful">effectful</option>
+    </select>
+    <label for="file">Component (.wasm, built with cargo component)</label>
+    <input id="file" name="file" type="file" required>
+    <button type="submit">Upload provider</button>
+  </form>
+
+  <h2>Registry</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Tier</th><th>Hash</th><th>Updated</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% if providers.is_empty() %}
+      <tr><td colspan="5">No providers registered — upload one above, or pass --provider / --provider-effectful at boot (flags upsert into this registry).</td></tr>
+      {% endif %}
+      {% for p in providers %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ p.tier }}</td>
+        <td><code title="{{ p.hash }}">{{ p.short_hash }}</code></td>
+        <td>{{ p.updated }}</td>
+        <td><button hx-delete="/api/providers/{{ p.name }}" hx-swap="none"
+                    hx-confirm="Unbind provider '{{ p.name }}'? Calls to it will err (the blob stays for rebind)."
+                    onclick="setTimeout(() => location.reload(), 300)">Delete</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

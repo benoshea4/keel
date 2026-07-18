@@ -21,7 +21,12 @@ impl bindings::Guest for Component {
                     .ok()
                     .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
                     .ok_or_else(|| r#"greet wants {"name": "..."}"#.to_string())?;
-                Ok(serde_json::json!({ "greeting": format!("hello {name}") }).to_string())
+                // v2.6: the registry gate rolls between these two builds live.
+                #[cfg(not(feature = "v2"))]
+                let greeting = format!("hello {name}");
+                #[cfg(feature = "v2")]
+                let greeting = format!("hello v2 {name}");
+                Ok(serde_json::json!({ "greeting": greeting }).to_string())
             }
             "shout" => Ok(request.to_uppercase()),
             other => Err(format!("unknown kind '{other}'")),

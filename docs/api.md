@@ -12,6 +12,9 @@ urlencoded/multipart body shape.
 | Route | What |
 |---|---|
 | `POST /api/modules?name=<n>` *(also multipart: `file`, `name`)* | Body = raw component bytes. Validates the `\0asm` magic (400 otherwise). → `{"hash": "<sha256hex>"}`. Content-addressed: re-upload is a no-op (the first name wins). |
+| `POST /api/providers?name=<n>&tier=pure\|effectful` *(also multipart: `file`, `name`, `tier`; v2.6)* | Body = provider component bytes, pre-flighted for the TIER at the door (wrong world/imports → 400, never a workflow failure) → `{"hash"}`. The swap is LIVE: the next `provider-call` uses it; recorded journal rows replay unchanged. With `&hash=<h>` and no body: REBIND the name to an already-stored blob (rollback; 404 if unknown hash). See [PROVIDERS.md](../PROVIDERS.md). |
+| `GET /api/providers` | Registry bindings: `[{name, tier, hash, updated_at}]`. |
+| `DELETE /api/providers/{name}` | Unbind (the blob stays for rebind). Later calls to the name err as unregistered — data, journaled. 404 if not bound. |
 
 ## Workflows
 

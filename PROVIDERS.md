@@ -131,10 +131,40 @@ Guest side — unchanged:
 let resp = host::provider_call("relay", "relay", r#"{"first_url": "..."}"#)?;
 ```
 
-## Future (deliberately not in v2.5)
+## The registry (v2.6)
+
+Providers live in a **content-addressed registry** inside the database
+(`scripts/smoke_provider_registry.sh` is the gate): blobs are immutable,
+keyed by sha256; a *name* is a mutable pointer to `(tier, hash)`.
+
+```bash
+curl -X POST --data-binary @relay.wasm 'localhost:8080/api/providers?name=relay&tier=effectful'
+curl 'localhost:8080/api/providers'                    # [{name, tier, hash, updated_at}]
+curl -X POST 'localhost:8080/api/providers?name=relay&tier=effectful&hash=<old>'  # rollback, no bytes
+curl -X DELETE 'localhost:8080/api/providers/relay'    # unbind (blob stays)
+```
+
+- **Pre-flight at the door**: the tier check runs at upload — a bad or
+  tier-violating component is a 400, never a workflow failure.
+- **The swap is live**: the next `provider-call` under the name uses the new
+  component; no restart. A `/providers` UI page lists and manages bindings.
+- **Replay beats the registry**: recorded journal rows are returned as-is, so
+  rolling a provider never rewrites history — a recovering workflow replays
+  the response the OLD version gave. (Corollary: a crash *mid-effectful-call*
+  re-runs the provider on recovery — if you rolled it in between and the new
+  version makes different wire calls, the nondeterminism trap fires. Roll
+  when calls are not in flight, same discipline as module upgrades.)
+- **Boot flags are an upload channel**: `--provider` / `--provider-effectful`
+  validate eagerly (a bad flag still fails the boot) and then UPSERT into the
+  registry — so since v2.6 flag-registered providers **persist across
+  restarts**; removal is the DELETE endpoint, not dropping the flag. A stored
+  blob that stops compiling under a future engine is logged and skipped at
+  boot (calls err as unregistered) — never a bricked start.
+- Fleets: each tenant has its own database, hence its own registry — roll a
+  tenant's providers through that tenant's API, zero restarts.
+
+## Future (deliberately not in v2.6)
 
 - **host-kv for providers**: durable provider-scoped state. Needs a
   namespacing design (provider keys must not collide with the workflow's own
   kv) before it exists.
-- **Content-addressed provider registry**: upload providers like modules
-  instead of pointing at paths, so fleets can roll them without restarts.

@@ -129,6 +129,21 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_at   INTEGER NOT NULL,
     cron         TEXT                       -- v2.1: 6-field expr; NULL = interval
 );
+
+-- v2.6: the content-addressed provider registry (PROVIDERS.md). Blobs are
+-- immutable and keyed by sha256; a name is a mutable pointer to (tier, hash).
+-- Old blobs are kept on rebind/delete — rollback is a rebind, no re-upload.
+CREATE TABLE IF NOT EXISTS provider_blobs (
+    hash        TEXT PRIMARY KEY,           -- sha256 hex of wasm
+    wasm        BLOB NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS providers (
+    name        TEXT PRIMARY KEY,
+    effectful   INTEGER NOT NULL,           -- the operator-granted tier
+    hash        TEXT NOT NULL REFERENCES provider_blobs(hash),
+    updated_at  INTEGER NOT NULL
+);
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
@@ -201,6 +216,91 @@ pub fn create_workflow(c: &Connection, id: &str, module_hash: &str, input_json: 
         rusqlite::params![id, module_hash, input_json, t],
     )?;
     Ok(())
+}
+
+// --- v2.6: provider registry -------------------------------------------------
+
+/// Upload path: store the (immutable, content-addressed) blob and point the
+/// name at it, one transaction. INSERT OR IGNORE on the blob makes re-upload
+/// of identical bytes a no-op, like modules.
+pub fn upsert_provider(
+    c: &Connection,
+    name: &str,
+    effectful: bool,
+    hash: &str,
+    wasm: &[u8],
+) -> Result<()> {
+    let t = now_ms();
+    c.execute_batch("BEGIN IMMEDIATE")?;
+    let r = (|| -> Result<()> {
+        c.execute(
+            "INSERT OR IGNORE INTO provider_blobs (hash, wasm, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![hash, wasm, t],
+        )?;
+        c.execute(
+            "INSERT INTO providers (name, effectful, hash, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(name) DO UPDATE SET effectful=?2, hash=?3, updated_at=?4",
+            rusqlite::params![name, effectful as i64, hash, t],
+        )?;
+        Ok(())
+    })();
+    match r {
+        Ok(()) => c.execute_batch("COMMIT")?,
+        Err(_) => c.execute_batch("ROLLBACK")?,
+    }
+    r
+}
+
+/// Rollback path helper: fetch a stored blob by content address (None = no
+/// such hash). The caller pre-flights it and then binds via upsert_provider —
+/// pre-flight BEFORE bind, so a failed compile never moves the pointer.
+pub fn get_provider_blob(c: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {
+    Ok(c.query_row(
+        "SELECT wasm FROM provider_blobs WHERE hash = ?1",
+        rusqlite::params![hash],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// (name, effectful, hash, updated_at) for every binding, name order.
+pub fn list_providers(c: &Connection) -> Result<Vec<(String, bool, String, i64)>> {
+    let mut stmt =
+        c.prepare("SELECT name, effectful, hash, updated_at FROM providers ORDER BY name")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)? != 0,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Unbind a name (the blob stays, for rebind). true = it existed.
+pub fn delete_provider(c: &Connection, name: &str) -> Result<bool> {
+    Ok(c.execute("DELETE FROM providers WHERE name = ?1", rusqlite::params![name])? > 0)
+}
+
+/// One boot-load row: (name, effectful, hash, wasm).
+pub type ProviderRegistryRow = (String, bool, String, Vec<u8>);
+
+/// Everything the boot needs to build the in-memory registry.
+pub fn load_provider_registry(c: &Connection) -> Result<Vec<ProviderRegistryRow>> {
+    let mut stmt = c.prepare(
+        "SELECT p.name, p.effectful, p.hash, b.wasm FROM providers p
+         JOIN provider_blobs b ON b.hash = p.hash ORDER BY p.name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)? != 0,
+            r.get::<_, String>(2)?,
+            r.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// Modules are content-addressed by sha256 → INSERT OR IGNORE makes re-upload a no-op
@@ -1113,5 +1213,42 @@ mod tests {
         let row = get_workflow(&c, "w").unwrap().unwrap();
         assert_eq!(row.status, "failed");
         assert_eq!(row.output.as_deref(), Some("cancelled by operator"));
+    }
+
+    #[test]
+    fn provider_registry_upsert_rebind_delete_roundtrip() {
+        let c = mem();
+        // Upload: blob + binding, one txn; identical bytes dedupe by hash.
+        upsert_provider(&c, "greet", false, "h1", b"\0asm-one").unwrap();
+        upsert_provider(&c, "relay", true, "h2", b"\0asm-two").unwrap();
+        upsert_provider(&c, "greet2", false, "h1", b"\0asm-one").unwrap();
+        let blobs: i64 = c
+            .query_row("SELECT COUNT(*) FROM provider_blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blobs, 2, "same bytes must share one blob");
+        assert_eq!(
+            list_providers(&c).unwrap(),
+            vec![
+                ("greet".into(), false, "h1".into(), list_providers(&c).unwrap()[0].3),
+                ("greet2".into(), false, "h1".into(), list_providers(&c).unwrap()[1].3),
+                ("relay".into(), true, "h2".into(), list_providers(&c).unwrap()[2].3),
+            ]
+        );
+        // Re-upload under the same name moves the pointer (a roll).
+        upsert_provider(&c, "greet", false, "h2", b"\0asm-two").unwrap();
+        assert_eq!(list_providers(&c).unwrap()[0].2, "h2");
+        // Rollback path: the old blob is still there by content address.
+        assert_eq!(get_provider_blob(&c, "h1").unwrap().as_deref(), Some(&b"\0asm-one"[..]));
+        assert_eq!(get_provider_blob(&c, "nope").unwrap(), None);
+        // Unbind keeps the blob; load only returns bound names.
+        assert!(delete_provider(&c, "greet2").unwrap());
+        assert!(!delete_provider(&c, "greet2").unwrap());
+        let loaded = load_provider_registry(&c).unwrap();
+        assert_eq!(
+            loaded.iter().map(|r| (r.0.as_str(), r.1, r.2.as_str())).collect::<Vec<_>>(),
+            vec![("greet", false, "h2"), ("relay", true, "h2")]
+        );
+        assert_eq!(loaded[0].3, b"\0asm-two");
+        assert_eq!(get_provider_blob(&c, "h1").unwrap().is_some(), true);
     }
 }

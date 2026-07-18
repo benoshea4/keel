@@ -44,6 +44,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_kv_upgrade.sh                       # must print KV-UPGRADE SMOKE PASS (v2.3)
 ./scripts/load_test.sh                              # must print LOAD TEST PASS (v2.4, 200 wf / cap 8)
 ./scripts/smoke_providers_effectful.sh              # must print EFFECTFUL PROVIDERS SMOKE PASS (v2.5)
+./scripts/smoke_provider_registry.sh                # must print PROVIDER REGISTRY SMOKE PASS (v2.6)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -453,6 +454,45 @@ L. *(v2.5, 2026-07-17 — EFFECTFUL providers; keel:provider 0.2.0, guest WIT
      provider's tier mid-workflow (effectful history under a pure grant trips
      the nondeterminism trap); cancel latency window = sum of the provider's
      wire timeouts; provider responses journal verbatim (don't echo secrets).
+
+M. *(v2.6, 2026-07-18 — content-addressed provider registry; NO WIT change)*
+   - **Schema**: provider_blobs(hash PK, wasm, created_at) — immutable,
+     sha256-keyed — + providers(name PK, effectful, hash FK, updated_at), the
+     mutable pointers. Additive CREATE IF NOT EXISTS (old DBs just gain empty
+     tables). db.rs: upsert_provider (blob INSERT OR IGNORE + binding upsert,
+     one txn), get_provider_blob, list_providers, delete_provider,
+     load_provider_registry; registry roundtrip unit test (35 total now).
+   - **EngineShared.providers became Arc<RwLock<HashMap>>** (was immutable
+     Arc<HashMap>): provider_call snapshots (tier, component) under a read
+     lock then runs lock-free — a mid-call mutation affects the NEXT call.
+     provider_call dispatch unchanged otherwise.
+   - **Boot semantics (deliberate behavior change, documented)**: flags
+     validate EAGERLY (bad flag still fails boot — the v2.2 promise), then
+     UPSERT into the db registry → flag providers now PERSIST across
+     restarts; removal is DELETE /api/providers/{name}. Then every stored
+     binding loads; a blob that stops compiling (e.g. future wasmtime bump)
+     logs + skips (name acts unregistered, journaled err) — no bricked boots
+     from stored state, uploads were pre-flighted anyway.
+   - **API** (api.rs, all behind the bearer token): POST /api/providers
+     (raw/multipart/rebind-by-hash shapes; tier REQUIRED — it is an operator
+     grant; per-tier preflight → 400 at the door), GET list, DELETE unbind.
+     lib.rs façade: upload_provider / rebind_provider (preflight BEFORE the
+     pointer moves) / remove_provider / list_providers — embedders get the
+     same registry. /providers UI page (upload form + bindings table + delete)
+     and a nav link on every page.
+   - **Replay-vs-registry rule**: recorded rows win in all three dispatch
+     arms, so rolling a provider never rewrites history — gated by killing a
+     workflow mid-sleep, re-uploading greet-v2 (greet grew a `v2` feature
+     flag, the counter-guest trick), restarting FLAGLESS: the recovered
+     workflow's output has the RECORDED v1 greeting, a new workflow gets v2,
+     and a rebind to the v1 hash (no bytes) rolls back. Sharp edge documented:
+     rolling mid-EFFECTFUL-call can trip the nondeterminism trap on recovery
+     (new version ≠ recorded wire calls) — roll when calls aren't in flight.
+   - **Gate**: smoke_provider_registry.sh (15 gates total) — also covers junk
+     → 400, effectful-under-tier=pure → 400, DELETE → workflow fails with
+     "no provider 'greet'" as data, flag-boot upsert visible in GET list, UI
+     page lists bindings. Lesson recorded: serde_json sorts object keys, so
+     the gate asserts via python dict parsing, not field-order greps.
 
 F. **Follow-ups from the review.** Panic guard in runner::spawn (catch_unwind →
    failed status + registry/notifier cleanup on the panic path; poison-tolerant

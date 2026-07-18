@@ -87,6 +87,116 @@ pub async fn upload_module(
     Ok(Json(json!({ "hash": hash })))
 }
 
+/// v2.6 — POST /api/providers → {"hash": "<sha256hex>"} — the LIVE provider
+/// registry (PROVIDERS.md). Three shapes:
+///   * raw wasm bytes: POST /api/providers?name=X&tier=pure|effectful
+///   * multipart form (the providers page): fields `file`, `name`, `tier`
+///   * rebind (rollback, no bytes): POST /api/providers?name=X&tier=T&hash=H
+///
+/// Pre-flighted for the tier at the door — a bad component is a 400 here,
+/// never a workflow failure. The swap is live: the next provider-call under
+/// this name uses the new component; recorded journal rows replay unchanged.
+pub async fn upload_provider(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+    req: Request,
+) -> Result<Json<Value>, ApiErr> {
+    let mut name = q.get("name").cloned().unwrap_or_default();
+    let mut tier = q.get("tier").cloned().unwrap_or_default();
+    let rebind_hash = q.get("hash").cloned();
+    let wasm: Bytes = if content_type(&req).starts_with("multipart/form-data") {
+        let mut mp = Multipart::from_request(req, &()).await.map_err(bad)?;
+        let mut file = None;
+        while let Some(field) = mp.next_field().await.map_err(bad)? {
+            match field.name() {
+                Some("file") => file = Some(field.bytes().await.map_err(bad)?),
+                Some("name") => name = field.text().await.map_err(bad)?,
+                Some("tier") => tier = field.text().await.map_err(bad)?,
+                _ => {}
+            }
+        }
+        file.unwrap_or_default()
+    } else {
+        Bytes::from_request(req, &()).await.map_err(bad)?
+    };
+    let effectful = match tier.as_str() {
+        "pure" => false,
+        "effectful" => true,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("tier must be 'pure' or 'effectful', got '{other}' — the tier is an operator grant, so it is required"),
+            ))
+        }
+    };
+    let eng = keel_core::Engine::from_shared(shared.clone());
+    if let Some(h) = rebind_hash {
+        if !wasm.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "send either bytes or ?hash= (rebind), not both".to_string(),
+            ));
+        }
+        return match eng.rebind_provider(&name, effectful, &h) {
+            Ok(true) => Ok(Json(json!({ "hash": h }))),
+            Ok(false) => Err((
+                StatusCode::NOT_FOUND,
+                format!("no stored provider blob with hash {h}"),
+            )),
+            Err(e) => Err((StatusCode::BAD_REQUEST, format!("{e:#}"))),
+        };
+    }
+    if !wasm.starts_with(b"\0asm") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "not a WebAssembly binary (missing \\0asm magic) — upload a component built with cargo component".to_string(),
+        ));
+    }
+    match eng.upload_provider(&name, effectful, &wasm) {
+        Ok(hash) => Ok(Json(json!({ "hash": hash }))),
+        // Pre-flight/validation failures dominate here and are the caller's
+        // to fix (wrong tier, wrong world, bad name).
+        Err(e) => Err((StatusCode::BAD_REQUEST, format!("{e:#}"))),
+    }
+}
+
+/// v2.6 — GET /api/providers → [{name, tier, hash, updated_at}]
+pub async fn list_providers(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Json<Value>, ApiErr> {
+    let rows = keel_core::Engine::from_shared(shared.clone())
+        .list_providers()
+        .map_err(internal)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|(name, effectful, hash, updated_at)| {
+            json!({
+                "name": name,
+                "tier": if *effectful { "effectful" } else { "pure" },
+                "hash": hash,
+                "updated_at": updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
+}
+
+/// v2.6 — DELETE /api/providers/{name} — unbind (the blob stays for rebind);
+/// subsequent calls to the name err as unregistered, journaled as data.
+pub async fn delete_provider(
+    State(shared): State<Arc<EngineShared>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiErr> {
+    if keel_core::Engine::from_shared(shared.clone())
+        .remove_provider(&name)
+        .map_err(internal)?
+    {
+        Ok(Json(json!({ "deleted": name })))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("no provider '{name}'")))
+    }
+}
+
 /// POST /api/workflows — two body shapes (Task 2.8) → {"id": "..."}:
 ///   * JSON (API): {"module_hash": "...", "input": <any json>}
 ///   * urlencoded form (the modules page): module_hash=...&input=<json text>

@@ -189,6 +189,22 @@ struct ModulesPage {
     authed: bool,
 }
 
+/// v2.6 — one provider-registry binding.
+struct ProvRow {
+    name: String,
+    tier: &'static str,
+    short_hash: String,
+    hash: String,
+    updated: String,
+}
+
+#[derive(Template)]
+#[template(path = "providers.html")]
+struct ProvidersPage {
+    providers: Vec<ProvRow>,
+    authed: bool,
+}
+
 #[derive(Template)]
 #[template(path = "schedules.html")]
 struct SchedulesPage {
@@ -257,6 +273,20 @@ fn mod_rows(conn: &keel_core::rusqlite::Connection) -> Result<Vec<ModRow>, UiErr
             name: module_label(&m.name, &m.hash),
             hash: m.hash,
             uploaded: ago(m.created_at),
+        })
+        .collect())
+}
+
+fn prov_rows(conn: &keel_core::rusqlite::Connection) -> Result<Vec<ProvRow>, UiErr> {
+    Ok(db::list_providers(conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|(name, effectful, hash, updated_at)| ProvRow {
+            name,
+            tier: if effectful { "effectful" } else { "pure" },
+            short_hash: short(&hash),
+            hash,
+            updated: ago(updated_at),
         })
         .collect())
 }
@@ -422,6 +452,17 @@ pub async fn modules_page(State(shared): State<Arc<EngineShared>>) -> Result<Htm
     let modules = mod_rows(&conn)?;
     render(ModulesPage {
         modules,
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// v2.6 — GET /providers: the live registry (upload form + bindings table).
+pub async fn providers_page(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    render(ProvidersPage {
+        providers: prov_rows(&conn)?,
         authed: shared.api_token.is_some(),
     })
 }

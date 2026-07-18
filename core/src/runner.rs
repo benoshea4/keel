@@ -68,10 +68,12 @@ pub struct EngineShared {
     /// v2.1 — --secrets-file path for the secret host call. None = the call
     /// errs (guest-visible) with "no secrets file configured".
     pub secrets_path: Option<String>,
-    /// v2.2 — capability providers by name, compiled at startup (provider.rs).
-    /// Arc'd so each workflow Ctx can hold the map without re-locking.
-    /// v2.5 — entries carry the operator-granted tier (pure vs effectful).
-    pub providers: Arc<HashMap<String, crate::provider::ProviderEntry>>,
+    /// v2.2 — capability providers by name; v2.5 — entries carry the
+    /// operator-granted tier. v2.6 — a LIVE REGISTRY (PROVIDERS.md): backed by
+    /// the providers/provider_blobs tables, mutated by the upload/rebind/
+    /// delete API without a restart. RwLock because provider_call reads it per
+    /// call; writers are the (rare) registry mutations.
+    pub providers: Arc<std::sync::RwLock<HashMap<String, crate::provider::ProviderEntry>>>,
 }
 
 impl EngineShared {
@@ -106,44 +108,67 @@ impl EngineShared {
         // v2.2 — compile + type-check every provider NOW: a provider that
         // could never handle a call is a config error at startup, not a
         // guest-visible mystery later.
+        // v2.6 — the registry is DB-backed (providers/provider_blobs tables).
+        // Boot flags are an upload channel: validated + pre-flighted EAGERLY
+        // (a bad flag provider still fails the boot, the v2.2 promise), then
+        // UPSERTED — so flag-registered providers persist across restarts,
+        // exactly like an API upload. Then every stored binding is loaded;
+        // stored blobs that no longer compile (e.g. a wasmtime upgrade) are
+        // logged and SKIPPED — the name acts unregistered (a journaled err),
+        // never a bricked boot: uploads were pre-flighted, so this is rare.
         let mut providers = HashMap::new();
-        let tiered = provider_bytes
-            .into_iter()
-            .map(|(n, w)| (n, w, false))
-            .chain(
-                provider_effectful_bytes
-                    .into_iter()
-                    .map(|(n, w)| (n, w, true)),
-            );
-        for (name, wasm, effectful) in tiered {
-            anyhow::ensure!(
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-                "provider name '{name}' must be non-empty [a-z0-9-]"
-            );
-            // v2.5 — per-tier pre-flight: the pure tier keeps its exact v2.2
-            // import-free guarantee; the effectful tier admits host-http (and
-            // pure components, which just don't use the grant).
-            let component = if effectful {
-                crate::provider::preflight_effectful(&engine, &wasm)
-            } else {
-                crate::provider::preflight(&engine, &wasm)
+        {
+            let conn = crate::db::open_conn(&db_path)?;
+            crate::db::migrate(&conn)?; // idempotent; Engine::open migrates too
+            let tiered = provider_bytes
+                .into_iter()
+                .map(|(n, w)| (n, w, false))
+                .chain(
+                    provider_effectful_bytes
+                        .into_iter()
+                        .map(|(n, w)| (n, w, true)),
+                );
+            for (name, wasm, effectful) in tiered {
+                anyhow::ensure!(
+                    crate::provider::valid_name(&name),
+                    "provider name '{name}' must be non-empty [a-z0-9-]"
+                );
+                let component = crate::provider::preflight_tier(&engine, &wasm, effectful)
+                    .with_context(|| format!("provider '{name}'"))?;
+                anyhow::ensure!(
+                    !providers.contains_key(&name),
+                    "duplicate provider name '{name}'"
+                );
+                let hash = crate::provider::sha256_hex(&wasm);
+                crate::db::upsert_provider(&conn, &name, effectful, &hash, &wasm)?;
+                providers.insert(
+                    name,
+                    crate::provider::ProviderEntry {
+                        component,
+                        effectful,
+                    },
+                );
             }
-            .with_context(|| format!("provider '{name}'"))?;
-            anyhow::ensure!(
-                providers
-                    .insert(
-                        name.clone(),
-                        crate::provider::ProviderEntry {
-                            component,
-                            effectful
-                        }
-                    )
-                    .is_none(),
-                "duplicate provider name '{name}'"
-            );
+            for (name, effectful, hash, wasm) in crate::db::load_provider_registry(&conn)? {
+                if providers.contains_key(&name) {
+                    continue; // registered by flag this boot — already compiled
+                }
+                match crate::provider::preflight_tier(&engine, &wasm, effectful) {
+                    Ok(component) => {
+                        providers.insert(
+                            name,
+                            crate::provider::ProviderEntry {
+                                component,
+                                effectful,
+                            },
+                        );
+                    }
+                    Err(e) => tracing::error!(
+                        "stored provider '{name}' ({hash}) no longer passes pre-flight — \
+                         skipping (calls will err as unregistered): {e:#}"
+                    ),
+                }
+            }
         }
         Ok(EngineShared {
             db_path,
@@ -161,7 +186,7 @@ impl EngineShared {
             api_token,
             max_guest_memory,
             secrets_path,
-            providers: Arc::new(providers),
+            providers: Arc::new(std::sync::RwLock::new(providers)),
         })
     }
 

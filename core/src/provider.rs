@@ -48,6 +48,35 @@ pub struct ProviderEntry {
     pub effectful: bool,
 }
 
+/// v2.6 — one name rule for both the boot flags and the upload API.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// sha256 hex — the registry's content address (same digest as modules).
+pub fn sha256_hex(wasm: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(wasm);
+    hex::encode(h.finalize())
+}
+
+/// Tier-appropriate pre-flight, used by boot flags AND the upload/rebind API.
+pub fn preflight_tier(
+    engine: &wasmtime::Engine,
+    wasm: &[u8],
+    effectful: bool,
+) -> Result<Component> {
+    if effectful {
+        preflight_effectful(engine, wasm)
+    } else {
+        preflight(engine, wasm)
+    }
+}
+
 /// Per-call store data for the PURE tier: just the memory cap (same figure as
 /// guests).
 struct ProviderCtx {

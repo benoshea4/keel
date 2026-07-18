@@ -65,6 +65,8 @@ jobs:
         run: ./scripts/smoke_providers.sh
       - name: Effectful providers smoke (v2.5)
         run: ./scripts/smoke_providers_effectful.sh
+      - name: Provider registry smoke (v2.6)
+        run: ./scripts/smoke_provider_registry.sh
       - name: KV-versioning upgrade smoke (v2.3)
         run: ./scripts/smoke_kv_upgrade.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)

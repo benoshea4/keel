@@ -125,6 +125,81 @@ impl Engine {
         Ok(hash)
     }
 
+    /// v2.6 — upload a provider into the LIVE registry (PROVIDERS.md):
+    /// pre-flighted for the given tier (a bad component fails HERE, never a
+    /// workflow), stored content-addressed, and swapped in without a restart —
+    /// the next provider-call under this name uses it. Returns sha256 hex.
+    pub fn upload_provider(&self, name: &str, effectful: bool, wasm: &[u8]) -> Result<String> {
+        anyhow::ensure!(
+            provider::valid_name(name),
+            "provider name '{name}' must be non-empty [a-z0-9-]"
+        );
+        let component = provider::preflight_tier(&self.shared.engine, wasm, effectful)
+            .with_context(|| format!("provider '{name}'"))?;
+        let hash = provider::sha256_hex(wasm);
+        let conn = db::open_conn(&self.shared.db_path)?;
+        db::upsert_provider(&conn, name, effectful, &hash, wasm).context("storing provider")?;
+        self.shared
+            .providers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                name.to_string(),
+                provider::ProviderEntry {
+                    component,
+                    effectful,
+                },
+            );
+        Ok(hash)
+    }
+
+    /// v2.6 — point a name at an ALREADY-STORED blob (rollback without
+    /// re-shipping bytes). false = no blob with that hash.
+    pub fn rebind_provider(&self, name: &str, effectful: bool, hash: &str) -> Result<bool> {
+        anyhow::ensure!(
+            provider::valid_name(name),
+            "provider name '{name}' must be non-empty [a-z0-9-]"
+        );
+        let conn = db::open_conn(&self.shared.db_path)?;
+        let Some(wasm) = db::get_provider_blob(&conn, hash)? else {
+            return Ok(false);
+        };
+        let component = provider::preflight_tier(&self.shared.engine, &wasm, effectful)
+            .with_context(|| format!("provider '{name}'"))?;
+        db::upsert_provider(&conn, name, effectful, hash, &wasm)?;
+        self.shared
+            .providers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                name.to_string(),
+                provider::ProviderEntry {
+                    component,
+                    effectful,
+                },
+            );
+        Ok(true)
+    }
+
+    /// v2.6 — unbind a name (its blob stays for rebind). Calls to the name
+    /// err as unregistered from now on. false = it wasn't bound.
+    pub fn remove_provider(&self, name: &str) -> Result<bool> {
+        let conn = db::open_conn(&self.shared.db_path)?;
+        let existed = db::delete_provider(&conn, name)?;
+        self.shared
+            .providers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        Ok(existed)
+    }
+
+    /// v2.6 — (name, effectful, hash, updated_at) for every binding.
+    pub fn list_providers(&self) -> Result<Vec<(String, bool, String, i64)>> {
+        let conn = db::open_conn(&self.shared.db_path)?;
+        db::list_providers(&conn)
+    }
+
     /// Create + start a workflow → its id. `input_json` is opaque JSON text.
     /// The row is committed BEFORE the spawn (crash between the two = the
     /// next open()'s recovery picks it up).

@@ -371,6 +371,17 @@ async fn serve(
             // Raw wasm bytes as the body; axum's ~2MB default rejects real components.
             post(api::upload_module).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
+        // v2.6 — the live provider registry (same body-size story as modules).
+        .route(
+            "/api/providers",
+            post(api::upload_provider)
+                .get(api::list_providers)
+                .layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/providers/{name}",
+            axum::routing::delete(api::delete_provider),
+        )
         .route(
             "/api/workflows",
             post(api::create_workflow).get(api::list_workflows),
@@ -400,6 +411,7 @@ async fn serve(
         .route("/modules", get(ui::modules_page))
         // v2.4 — schedules UI (create/pause/resume/delete + 2s polling).
         .route("/schedules", get(ui::schedules_page))
+        .route("/providers", get(ui::providers_page))
         .route("/partials/schedules", get(ui::schedules_partial))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))

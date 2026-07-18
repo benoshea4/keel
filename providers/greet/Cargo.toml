@@ -25,3 +25,8 @@ package = "keel:greet-provider"
 [package.metadata.component.target]
 path = "../../provider-wit"
 world = "provider"
+
+# v2.6 registry gate: `--features v2` changes the greeting so the live-roll
+# test can SEE which version served a call (same trick as guests/counter).
+[features]
+v2 = []

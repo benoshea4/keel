@@ -58,8 +58,11 @@ pub struct Ctx {
     /// calls build their own short-lived Store on it.
     pub engine: wasmtime::Engine,
     /// v2.2 — compiled capability providers by name (see provider.rs);
-    /// v2.5 — each entry carries the tier the operator granted it.
-    pub providers: Arc<std::collections::HashMap<String, crate::provider::ProviderEntry>>,
+    /// v2.5 — each entry carries the tier the operator granted it;
+    /// v2.6 — a live registry (RwLock: the upload/rebind/delete API mutates it
+    /// without a restart). provider_call snapshots the entry per call.
+    pub providers:
+        Arc<std::sync::RwLock<std::collections::HashMap<String, crate::provider::ProviderEntry>>>,
     /// v2.2 — provider calls reuse the per-guest memory cap.
     pub max_guest_memory: usize,
 }
@@ -438,7 +441,16 @@ impl keel::workflow::host_api::Host for Ctx {
         // journaled() call, but replay stays tier-independent: a recorded row
         // is returned without touching the provider in all three arms (the
         // effectful arm's scan consumes the whole recorded scope).
-        match providers.get(&name) {
+        // v2.6 — snapshot (tier, component) under a read lock, then run
+        // without holding it: a registry mutation mid-call affects the NEXT
+        // call; this one keeps the component it resolved. Replay stays
+        // registry-independent — recorded rows win in all three arms.
+        let resolved = providers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&name)
+            .map(|e| (e.effectful, e.component.clone()));
+        match resolved {
             None => {
                 let r = self
                     .j
@@ -453,8 +465,7 @@ impl keel::workflow::host_api::Host for Ctx {
                     Resp::Err { err } => Err(err),
                 })
             }
-            Some(entry) if !entry.effectful => {
-                let component = entry.component.clone();
+            Some((false, component)) => {
                 let r = self
                     .j
                     .journaled(&jkind, &jreq, move || {
@@ -473,7 +484,7 @@ impl keel::workflow::host_api::Host for Ctx {
                     Resp::Err { err } => Err(err),
                 })
             }
-            Some(entry) => {
+            Some((true, component)) => {
                 // Effectful: the provider scope may span several journal rows
                 // (its wire calls at seqs N.., then the terminal custom: row).
                 // First try to consume a COMPLETED recorded scope without
@@ -512,7 +523,7 @@ impl keel::workflow::host_api::Host for Ctx {
                         };
                         let (final_seq, outcome) = crate::provider::call_effectful(
                             &engine,
-                            &entry.component,
+                            &component,
                             max_mem,
                             &name,
                             &kind,
