@@ -57,6 +57,13 @@ enum Cmd {
         /// fails (allocation error → trap) instead of eating the host.
         #[arg(long, default_value_t = 256)]
         max_guest_memory_mb: usize,
+        /// Phase 4 (micro-cloud) — workflow fuel budget, reset to full at
+        /// every run/resume. A runaway kill-switch (an infinite loop dies),
+        /// not a quota: the default is minutes of continuous compute, and
+        /// parked workflows spend zero. Raise it if a legitimate replay of a
+        /// very long journal ever trips it (checkpoints bound replay cost).
+        #[arg(long, default_value_t = 10_000_000_000_000)]
+        wf_fuel_limit: u64,
         /// v1.3 — delete completed/failed workflows (and their journal, events,
         /// snapshots, kv) this many hours after they finish. 0 = keep forever.
         #[arg(long, default_value_t = 0)]
@@ -162,6 +169,7 @@ async fn main() -> Result<()> {
             max_running,
             api_token,
             max_guest_memory_mb,
+            wf_fuel_limit,
             retain_terminal_hours,
             backup_dir,
             backup_interval_secs,
@@ -176,6 +184,7 @@ async fn main() -> Result<()> {
                 max_running,
                 api_token,
                 max_guest_memory_mb,
+                wf_fuel_limit,
                 retain_terminal_hours,
                 backup_dir,
                 backup_interval_secs,
@@ -203,6 +212,7 @@ async fn serve(
     max_running: u32,
     api_token: Option<String>,
     max_guest_memory_mb: usize,
+    wf_fuel_limit: u64,
     retain_terminal_hours: u64,
     backup_dir: Option<String>,
     backup_interval_secs: u64,
@@ -260,6 +270,7 @@ async fn serve(
     opts.max_running = max_running;
     opts.api_token = api_token;
     opts.max_guest_memory = max_guest_memory_mb.max(1) * 1024 * 1024;
+    opts.wf_fuel_limit = wf_fuel_limit;
     opts.secrets_path = secrets_file;
     opts.providers = provider_bytes;
     opts.providers_effectful = provider_effectful_bytes;

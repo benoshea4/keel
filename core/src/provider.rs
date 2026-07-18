@@ -26,6 +26,13 @@ use wasmtime::Store;
 
 use crate::journal::JournalCtx;
 
+/// Phase 4 (micro-cloud) — with `consume_fuel(true)` engine-wide, provider
+/// stores need fuel too. Same 10^13 runaway backstop as the workflow default
+/// (--wf-fuel-limit); the per-tier EPOCH budgets remain the primary
+/// containment, so this only matters for a provider that somehow spins
+/// through ~10s of ticks in fueled-but-cheap instructions.
+const PROVIDER_FUEL: u64 = 10_000_000_000_000;
+
 bindgen!({
     path: "../provider-wit", // keel/provider-wit/provider.wit, relative to core/
     world: "provider",
@@ -265,11 +272,17 @@ pub fn call(
     };
     let mut store = Store::new(engine, ctx);
     store.limiter(|c| &mut c.limits);
-    // Epoch budget: ~10 ticks of the engine's 1s ticker. A provider that
-    // spins traps into Err instead of pinning a worker thread forever —
+    // Phase 4 (micro-cloud): fuel is engine-wide now; providers get the same
+    // 10^13 runaway backstop as workflows (the ext spec predates providers).
+    // The epoch budget below stays the PRIMARY containment.
+    if let Err(e) = store.set_fuel(PROVIDER_FUEL) {
+        return Err(format!("provider store setup failed: {e}"));
+    }
+    // Epoch budget: ~10s of the engine's 100ms ticker (100 ticks). A provider
+    // that spins traps into Err instead of pinning a worker thread forever —
     // providers never get the guests' escape hatch (there is no park loop to
     // cancel them at), so the budget is the whole containment story.
-    store.set_epoch_deadline(10);
+    store.set_epoch_deadline(100);
     let linker: Linker<ProviderCtx> = Linker::new(engine);
     let p = match Provider::instantiate(&mut store, component, &linker) {
         Ok(p) => p,
@@ -317,19 +330,25 @@ pub fn call_effectful(
     };
     let mut store = Store::new(engine, ctx);
     store.limiter(|c| &mut c.limits);
-    // Budget: ~10 ticks of PURE-WASM time, like the pure tier — but an http
-    // wait must not count against it (the epoch keeps advancing during a slow
-    // wire call, and the deadline check fires on the first wasm instruction
-    // AFTER the host call returns). The callback excuses exactly one firing
-    // per completed host call; consecutive firings mean the provider is
-    // spinning in wasm and get counted.
+    // Phase 4 (micro-cloud): same 10^13 fuel backstop as the pure tier; the
+    // epoch budget below stays the primary containment.
+    if let Err(e) = store.set_fuel(PROVIDER_FUEL) {
+        let seq = store.data().j.next_seq;
+        return (seq, Ok(Err(format!("provider store setup failed: {e}"))));
+    }
+    // Budget: ~10s (100 ticks) of PURE-WASM time, like the pure tier — but an
+    // http wait must not count against it (the epoch keeps advancing during a
+    // slow wire call, and the deadline check fires on the first wasm
+    // instruction AFTER the host call returns). The callback excuses exactly
+    // one firing per completed host call; consecutive firings mean the
+    // provider is spinning in wasm and get counted.
     store.set_epoch_deadline(1);
     store.epoch_deadline_callback(|mut cx| {
         let d = cx.data_mut();
         if d.returned_from_host {
             d.returned_from_host = false;
             Ok(wasmtime::UpdateDeadline::Continue(1))
-        } else if d.ticks_used < 10 {
+        } else if d.ticks_used < 100 {
             d.ticks_used += 1;
             Ok(wasmtime::UpdateDeadline::Continue(1))
         } else {

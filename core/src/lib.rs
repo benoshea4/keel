@@ -48,6 +48,13 @@ pub struct EngineOptions {
     /// a provider this tier is an operator decision — names share one
     /// namespace with `providers`.
     pub providers_effectful: Vec<(String, Vec<u8>)>,
+    /// Phase 4 (micro-cloud) — the workflow fuel budget, reset to this full
+    /// value at every run/resume. A runaway kill-switch, not a quota: 10^13
+    /// instructions is minutes of continuous compute, so an infinite loop
+    /// dies while a long (checkpoint-bounded) replay never trips it. Fuel,
+    /// not epochs, because parked workflows spend zero and replay consumes
+    /// exactly what the original did.
+    pub wf_fuel_limit: u64,
 }
 
 impl EngineOptions {
@@ -60,6 +67,7 @@ impl EngineOptions {
             secrets_path: None,
             providers: Vec::new(),
             providers_effectful: Vec::new(),
+            wf_fuel_limit: 10_000_000_000_000,
         }
     }
 }

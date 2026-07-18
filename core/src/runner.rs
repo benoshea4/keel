@@ -68,6 +68,9 @@ pub struct EngineShared {
     /// v2.1 — --secrets-file path for the secret host call. None = the call
     /// errs (guest-visible) with "no secrets file configured".
     pub secrets_path: Option<String>,
+    /// Phase 4 (micro-cloud) — workflow fuel budget (--wf-fuel-limit), reset
+    /// to full at every run/resume; see EngineOptions.wf_fuel_limit.
+    pub wf_fuel_limit: u64,
     /// v2.2 — capability providers by name; v2.5 — entries carry the
     /// operator-granted tier. v2.6 — a LIVE REGISTRY (PROVIDERS.md): backed by
     /// the providers/provider_blobs tables, mutated by the upload/rebind/
@@ -86,6 +89,7 @@ impl EngineShared {
             secrets_path,
             providers: provider_bytes,
             providers_effectful: provider_effectful_bytes,
+            wf_fuel_limit,
         } = opts;
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
@@ -94,14 +98,22 @@ impl EngineShared {
         // flag, but a spinning guest never parks — without this, its only off
         // switch was hand-editing the database.
         config.epoch_interruption(true);
+        // Phase 4 (micro-cloud, ext spec §E1): fuel on the ONE engine — the
+        // per-instruction cost buys one component cache and one compilation
+        // per module across workflows, providers, functions and solvers.
+        // Every Store MUST set_fuel or it traps on its first instruction;
+        // profiles: workflows/providers get runaway kill-switches, functions
+        // and solvers get real quotas.
+        config.consume_fuel(true);
         let engine = wasmtime::Engine::new(&config)?;
         {
             // Detached ticker for the process-wide Engine (clones share state).
-            // One tick per second = the worst-case latency for cancelling a
+            // 100ms per tick (ext spec §E1): function/solver deadlines are
+            // ceil(time_limit_ms/100), and it bounds the cancel latency for a
             // guest that is executing wasm rather than parked in a host call.
             let engine = engine.clone();
             std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 engine.increment_epoch();
             });
         }
@@ -186,6 +198,7 @@ impl EngineShared {
             api_token,
             max_guest_memory,
             secrets_path,
+            wf_fuel_limit,
             providers: Arc::new(std::sync::RwLock::new(providers)),
         })
     }
@@ -415,11 +428,17 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
     };
     let mut store = Store::new(&shared.engine, ctx);
     store.limiter(|c| &mut c.limits);
+    // Phase 4 (micro-cloud) — the workflow fuel profile: reset to the FULL
+    // budget at every run/resume, so replay of any segment consumes exactly
+    // what the original did and never trips a limit the original survived.
+    // Parked workflows spend zero (fuel is per-instruction). OutOfFuel is
+    // mapped to the runaway-guest failure in the trap arm below.
+    store.set_fuel(shared.wf_fuel_limit)?;
     // Post-review hardening: with epoch_interruption on, every store needs a
-    // deadline. The callback re-arms it each 1s tick unless the abort flag is
-    // set — turning cancel/upgrade into a trap even for guests that never park.
-    // The AbortForUpgrade in the error chain routes through the same silent-exit
-    // arm as the park-loop aborts below.
+    // deadline. The callback re-arms it each 100ms tick unless the abort flag
+    // is set — turning cancel/upgrade into a trap even for guests that never
+    // park. The AbortForUpgrade in the error chain routes through the same
+    // silent-exit arm as the park-loop aborts below.
     store.set_epoch_deadline(1);
     store.epoch_deadline_callback(|cx| {
         let d = cx.data();
@@ -454,6 +473,24 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
                 .any(|c| c.downcast_ref::<AbortForUpgrade>().is_some())
             {
                 shared.notifier.clear_abort(id);
+                return Ok(());
+            }
+            // Phase 4 (micro-cloud, ext spec §E1): fuel exhaustion is the
+            // runaway-guest kill-switch — its own message, because "trap:
+            // all fuel consumed" reads like an engine bug, not a spin. This
+            // SUPERSEDES the base spec's runaway-guest non-goal.
+            if e.chain().any(|c| {
+                matches!(
+                    c.downcast_ref::<wasmtime::Trap>(),
+                    Some(wasmtime::Trap::OutOfFuel)
+                )
+            }) {
+                db::set_status(
+                    &conn,
+                    id,
+                    "failed",
+                    Some("runaway guest: exhausted compute budget"),
+                )?;
                 return Ok(());
             }
             // Other traps include journaled()'s "nondeterministic replay at seq N"
