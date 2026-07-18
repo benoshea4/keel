@@ -1,0 +1,5 @@
+# Relative public URL — the app is served under /apps/<name>/, so asset URLs
+# must resolve against the page, never the site root (the human check caught
+# exactly this: absolute /hello-*.js 404s under the mount point → blank page).
+[build]
+public_url = "./"

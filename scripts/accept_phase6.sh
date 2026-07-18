@@ -76,6 +76,13 @@ stored=$(curl -s -X POST --data-binary @hello.zip localhost:8080/api/apps/hello/
 root=$(curl -s localhost:8080/apps/hello/)
 echo "$root" | grep -q "<script" || { echo "FAIL: app root has no <script"; exit 1; }
 echo "$root" | grep -q "\.wasm" || { echo "FAIL: app root references no .wasm"; exit 1; }
+# Regression guard (found by the human check): asset URLs must be RELATIVE —
+# absolute /hello-*.js resolves against the site root under /apps/<name>/ and
+# the page renders blank. Trunk.toml pins public_url = "./".
+echo "$root" | grep -q 'href="/hello' && { echo "FAIL: root-absolute asset URLs — Trunk public_url must be ./"; exit 1; }
+JS_REF=$(echo "$root" | grep -o 'hello-[a-z0-9]*\.js' | head -1)
+code=$(curl -s -o /dev/null -w "%{http_code}" "localhost:8080/apps/hello/$JS_REF")
+[ "$code" = "200" ] || { echo "FAIL: app JS '$JS_REF' not fetchable under the app path -> $code"; exit 1; }
 
 # --- 4. the .wasm asset: right type, real size ------------------------------
 WASM_PATH=$(sqlite3 $DB "SELECT path FROM assets WHERE app='hello' AND path LIKE '%.wasm'")
