@@ -144,6 +144,63 @@ CREATE TABLE IF NOT EXISTS providers (
     hash        TEXT NOT NULL REFERENCES provider_blobs(hash),
     updated_at  INTEGER NOT NULL
 );
+
+-- Micro-cloud phases 4-6 (ext spec §E3). routes binds URL prefixes to
+-- function components with per-route quotas; invocations is the usage ledger
+-- (EVERY function/solver run writes a row, failures included); problems/
+-- cases/submissions are the phase-5 judge; apps/assets are phase-6 hosted
+-- full-stack apps.
+CREATE TABLE IF NOT EXISTS routes (
+    prefix       TEXT PRIMARY KEY,          -- e.g. '/fn/echo'; longest-prefix match wins
+    module_hash  TEXT NOT NULL REFERENCES modules(hash),
+    fuel_limit   INTEGER NOT NULL DEFAULT 500000000,
+    mem_limit    INTEGER NOT NULL DEFAULT 67108864,
+    time_limit_ms INTEGER NOT NULL DEFAULT 5000,
+    created_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invocations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,              -- 'function' | 'app' | 'solve'
+    ref         TEXT NOT NULL,              -- route prefix, app name, or submission id
+    module_hash TEXT NOT NULL,
+    outcome     TEXT NOT NULL,              -- 'ok'|'guest_error'|'tle'|'mle'|'oof'|'trap'
+    fuel_used   INTEGER,
+    peak_mem    INTEGER,
+    duration_ms INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS problems (
+    slug        TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    statement   TEXT NOT NULL               -- markdown, rendered as <pre> (no md dep)
+);
+CREATE TABLE IF NOT EXISTS cases (
+    problem     TEXT NOT NULL REFERENCES problems(slug),
+    idx         INTEGER NOT NULL,
+    input       TEXT NOT NULL,
+    expected    TEXT NOT NULL,              -- exact string match after trim
+    PRIMARY KEY (problem, idx)
+);
+CREATE TABLE IF NOT EXISTS submissions (
+    id          TEXT PRIMARY KEY,           -- uuid
+    problem     TEXT NOT NULL REFERENCES problems(slug),
+    module_hash TEXT NOT NULL REFERENCES modules(hash),
+    verdict     TEXT,                       -- NULL while judging; then AC|WA|TLE|MLE|RE|OOF
+    detail      TEXT,                       -- JSON array of per-case results
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS apps (
+    name         TEXT PRIMARY KEY,          -- [a-z0-9-]+, validated at the API
+    backend_hash TEXT REFERENCES modules(hash),  -- nullable: static-only apps allowed
+    created_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS assets (
+    app          TEXT NOT NULL REFERENCES apps(name),
+    path         TEXT NOT NULL,             -- 'index.html', 'pkg/app_bg.wasm', ...
+    content_type TEXT NOT NULL,
+    bytes        BLOB NOT NULL,
+    PRIMARY KEY (app, path)
+);
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
@@ -393,6 +450,21 @@ pub struct WorkflowRow {
     pub output: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// The public JSON shape of a workflow — GET /api/workflows/:id AND the
+/// platform-api `get-workflow` host call return exactly this (micro-cloud
+/// Task 4.2: "share the serializer, don't duplicate it"). `output` stays a
+/// JSON *string* (or null), never re-parsed — same contract as the API.
+pub fn workflow_json(wf: &WorkflowRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": wf.id,
+        "status": wf.status,
+        "output": wf.output,
+        "module_hash": wf.module_hash,
+        "created_at": wf.created_at,
+        "updated_at": wf.updated_at,
+    })
 }
 
 pub fn get_workflow(c: &Connection, id: &str) -> Result<Option<WorkflowRow>> {
@@ -960,6 +1032,31 @@ pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
+}
+
+// --- Micro-cloud phases 4-6 (ext spec §E3 tables) --------------------------------
+
+/// The usage ledger (ext spec Task 4.3 step 6): one row per function/solver
+/// invocation, written on EVERY outcome — metering that only counts successes
+/// is fiction. fuel/peak are Options because a store that failed setup has
+/// nothing truthful to report.
+#[allow(clippy::too_many_arguments)] // 1:1 with the ledger columns, nothing more
+pub fn insert_invocation(
+    c: &Connection,
+    kind: &str,
+    refname: &str,
+    module_hash: &str,
+    outcome: &str,
+    fuel_used: Option<i64>,
+    peak_mem: Option<i64>,
+    duration_ms: i64,
+) -> Result<()> {
+    c.execute(
+        "INSERT INTO invocations (kind, ref, module_hash, outcome, fuel_used, peak_mem, duration_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![kind, refname, module_hash, outcome, fuel_used, peak_mem, duration_ms, now_ms()],
+    )?;
+    Ok(())
 }
 
 // --- Unit tests (post-review hardening) ------------------------------------------

@@ -13,11 +13,13 @@
 
 pub mod cron;
 pub mod db;
+pub mod function;
 pub mod host;
 pub mod journal;
 pub mod notifier;
 pub mod provider;
 pub mod runner;
+pub mod sandbox;
 
 // Consumers that type a Connection (the binary's ui.rs) use OUR rusqlite —
 // re-exported so the workspace can never end up with two versions of it.

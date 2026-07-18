@@ -579,7 +579,7 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
 
    PROGRESS (tick after every task — this is the compact-resume pointer):
    - [x] 4.1 consume_fuel + 100ms retick + --wf-fuel-limit + runaway retrofit; base gates re-run
-   - [ ] 4.2 WIT 0.7.0 + handler/solver worlds + platform-api host impl (FnCtx)
+   - [x] 4.2 WIT 0.7.0 + handler/solver worlds + platform-api host impl (FnCtx)
    - [ ] 4.3 routes table/API + /fn dispatcher + classify() + ledger
    - [ ] 4.4 guests echo-fn + starter-fn
    - [ ] 4.5 /routes UI + nav links (Routes/Playground/Apps/Usage) on all pages
@@ -594,7 +594,7 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - [ ] 6.2 apps/hello (Leptos+Trunk)
    - [ ] 6.3 /apps UI
    - [ ] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
-   - NEXT: Task 4.2.
+   - NEXT: Task 4.3.
 
 ---
 

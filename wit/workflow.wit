@@ -9,8 +9,12 @@
 // http-request signature change means guests that call it must add the new
 // argument (0 = engine default) when rebuilding.
 // 0.6.0 (v2.2) added provider-call — a new import only; rebuild suffices.
+// 0.7.0 (micro-cloud phase 4) added `interface platform-api` and two NEW
+// worlds — `handler` (stateless serverless functions) and `solver`
+// (import-free judge submissions). `world workflow` is textually unchanged:
+// workflow guests rebuild against 0.7.0 without source changes.
 // Never edit an interface in place mid-phase.
-package keel:workflow@0.6.0;
+package keel:workflow@0.7.0;
 
 interface host-api {
     /// v1.2 — http-request's result. status is the raw code (2xx not special);
@@ -95,6 +99,29 @@ interface host-api {
     log: func(msg: string);
 }
 
+/// Phase 4 (micro-cloud) — the FUNCTION host surface. Everything here is
+/// DIRECT, not journaled: functions are stateless and non-durable on purpose
+/// (no journal, no replay, real now/random). Durability lives one door over —
+/// a function that needs reliability calls start-workflow.
+interface platform-api {
+    /// Forwarded to engine logs with a `fn:` prefix. Not metered.
+    log: func(msg: string);
+
+    /// Real wall clock, unix epoch milliseconds. Direct (functions replay never).
+    now-ms: func() -> u64;
+
+    /// Real randomness. Direct.
+    random-u64: func() -> u64;
+
+    /// Start a durable workflow (base-spec semantics: the row commits before
+    /// the spawn). Returns the workflow id; err = unknown module hash.
+    start-workflow: func(module-hash: string, input: string) -> result<string, string>;
+
+    /// Fetch a workflow as a JSON string — the same shape as
+    /// GET /api/workflows/:id ({"id","status","output",...}). err = unknown id.
+    get-workflow: func(id: string) -> result<string, string>;
+}
+
 world workflow {
     import host-api;
 
@@ -104,4 +131,36 @@ world workflow {
     /// Continue from a checkpointed state blob. Guests that never call checkpoint
     /// implement this as: return Err("no checkpoints").
     export resume: func(state: list<u8>) -> result<string, string>;
+}
+
+/// Phase 4 (micro-cloud) — a stateless serverless function: fresh sandboxed
+/// instance per request, fuel/epoch/memory quotas from the bound route.
+world handler {
+    import platform-api;
+
+    /// The request as the host hands it over. `path` is the part AFTER the
+    /// route prefix (always starts with "/"); `query` is the raw query string
+    /// (may be ""); the host caps `body` at 10 MiB before invoking.
+    record http-request {
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    export handle: func(req: http-request) -> http-response;
+}
+
+/// Phase 5 (micro-cloud) — a judge submission. NO imports at all: solvers are
+/// pure compute, the tightest sandbox in the platform — the module cannot
+/// name a single external capability.
+world solver {
+    export solve: func(input: string) -> result<string, string>;
 }

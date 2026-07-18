@@ -755,14 +755,9 @@ pub async fn get_workflow(
         .ok_or((StatusCode::NOT_FOUND, "unknown workflow id".to_string()))?;
     // NOTE: output is returned as a JSON *string* (or null), not re-parsed — the
     // acceptance script knowingly checks the DB, not this field (SPEC.md Task 1.7).
-    Ok(Json(json!({
-        "id": wf.id,
-        "status": wf.status,
-        "output": wf.output,
-        "module_hash": wf.module_hash,
-        "created_at": wf.created_at,
-        "updated_at": wf.updated_at,
-    })))
+    // Shape lives in core (db::workflow_json) — platform-api's get-workflow
+    // host call returns the identical JSON (micro-cloud Task 4.2).
+    Ok(Json(db::workflow_json(&wf)))
 }
 
 /// GET /api/workflows/{id}/journal
