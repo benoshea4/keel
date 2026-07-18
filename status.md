@@ -628,6 +628,12 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
      via the app's own endpoints — start through the backend, poll through
      the backend, count:3 — zip-slip 400 with zero rows). Human check
      printed, not automated. Full 18-script suite green after (see below).
+     HUMAN CHECK PASSED 2026-07-19: the user clicked "Start job" in a real
+     browser and pasted back "workflow 87ae60ad…: completed / {"count":3}".
+     It first surfaced a REAL bug the gate missed — trunk's default ABSOLUTE
+     asset URLs (/hello-*.js) 404 under the /apps/<name>/ mount → blank
+     page. Fixed with Trunk.toml public_url = "./"; the gate now rejects
+     root-absolute refs and fetches the JS through the app path (cdeacbd).
 
    PHASE 5 RECORD (v2.8, 2026-07-18):
    - **Judge (5.2)**: judge.rs = bindgen #4 (world solver, EMPTY linker — the
