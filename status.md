@@ -512,6 +512,90 @@ long-lived deployment upgrading the engine under stored modules would. Phase 3 b
 to 0.3.0 and is breaking by design (adds a `resume` export) — all guests get a stub
 `resume` then, per Task 3.1.
 
+N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
+   (started 2026-07-18).** Source spec:
+   `../keel-microcloud-extension-spec.md` rev 1.0 (functions → sandbox/judge →
+   hosted apps; "one binary micro-cloud"). It was written against the BASE
+   spec's world (phases 1–3, WIT 0.3.0, no providers/auth/schedules/registry),
+   so where its letter conflicts with shipped v2.6 reality, these resolutions
+   govern (spirit kept; each marked in code):
+   1. **WIT bump is 0.6.0 → 0.7.0** (not "0.4.0" — that version shipped in
+      v1.2). Package `keel:workflow@0.7.0` adds `interface platform-api`
+      (log, now-ms, random-u64, start-workflow, get-workflow), `world handler`
+      (imports platform-api; the http-request/http-response records are
+      declared INLINE in the world — WIT has no package-level types, the ext
+      spec's snippet placement isn't valid syntax), `world solver` (zero
+      imports — tightest sandbox). `world workflow` text unchanged. Engine
+      grows bindgen #3 (handler) + #4 (solver) in separate rust modules
+      (provider.rs already set this pattern).
+   2. **Ticker 1s → 100ms.** Epochs + a ticker already exist (cancel v1.x,
+      provider budgets v2.2/v2.5). Rescale: pure provider deadline 10→100
+      ticks, effectful ticks_used budget 10→100 (both still "~10s of wasm
+      time"); workflow cancel callback unchanged (re-arm Continue(1) each
+      tick; worst-case cancel latency IMPROVES 1s→100ms). Function/solver
+      deadlines = ceil(time_limit_ms/100) + epoch_deadline_trap (no callback).
+   3. **Fuel engine-wide**: `consume_fuel(true)` on the ONE Engine. Every
+      store sets fuel or instantly traps at 0: workflow stores =
+      `--wf-fuel-limit` (default 10^13; new EngineOptions.wf_fuel_limit;
+      OutOfFuel → status failed, output "runaway guest: exhausted compute
+      budget"); provider stores (pure + effectful — the ext spec predates
+      providers) = 10^13 constant backstop, epoch budget stays their primary
+      containment; function/solver stores = per-route / judge quotas (the
+      real metering). Workflow epoch profile is NOT the ext spec's
+      deadline(10^12)+trap: our deadline(1)+abort-checking callback IS the
+      cancel mechanism (base gates require it) and already guarantees epochs
+      never kill a healthy workflow.
+   4. **runner::spawn call-sites: now FIVE** (creation, recovery, upgrade,
+      schedules v2.0, platform-api start-workflow). Ext spec says "four"
+      because it predates schedules. Every "exactly 4" comment updated.
+   5. **Auth boundary**: v1.1 token auth exists; ext spec declares auth a
+      non-goal for new surfaces. Resolution: CONTROL plane (/api/routes,
+      /api/problems, /api/submissions, /api/apps, new UI pages) sits behind
+      the existing middleware like everything else; DATA plane (/fn/*,
+      /apps/* serving) is mounted AFTER the auth layer = public by design — a
+      browser-served app must call its own backend tokenless. In
+      operations.md.
+   6. **Placement per the v2.2 crate split**: core/src/sandbox.rs (MemLimiter,
+      Outcome, classify — normative order: mle→oof→tle→trap→ok),
+      core/src/function.rs (handler bindgen, FnCtx, platform-api host impl,
+      invoke_handler — ledger write INSIDE so metering can't be forgotten),
+      core/src/judge.rs (solver bindgen, per-case constants,
+      judge_submission). Binary: api.rs CRUD, dispatch.rs (/fn + /apps
+      serving), ui.rs + templates (routes/playground/problem/usage/apps),
+      main.rs wiring. db.rs: E3 tables appended to MIGRATION + accessors.
+      The {id,status,output} workflow JSON is shared via a core helper used
+      by BOTH api::get_workflow and platform-api get-workflow.
+   7. **Guests**: echo-fn + starter-fn (world handler); sum-solver (+`wrong`
+      feature), loop-solver, hog-solver (world solver); the runaway-workflow
+      fixture is the EXISTING guests/spin (already `loop {}`). apps/hello =
+      Leptos 0.7 CSR via Trunk (phase 6; trunk not installed yet — cargo
+      install locally, taiki-e/install-action in CI; fallback ladder per
+      spec Task 6.2).
+   8. **Ship cadence**: one commit per task (§0), per phase: angry
+      self-review → full gate suite (grows 15→18) → push → CI → tag → release
+      with hand-written notes. Tags: phase 4 = v2.7, phase 5 = v2.8,
+      phase 6 = **v3.0** (the micro-cloud completion is the 3.0 story).
+   9. `invocations.ref` column name is fine (REF isn't reserved in SQLite).
+
+   PROGRESS (tick after every task — this is the compact-resume pointer):
+   - [ ] 4.1 consume_fuel + 100ms retick + --wf-fuel-limit + runaway retrofit; base gates re-run
+   - [ ] 4.2 WIT 0.7.0 + handler/solver worlds + platform-api host impl (FnCtx)
+   - [ ] 4.3 routes table/API + /fn dispatcher + classify() + ledger
+   - [ ] 4.4 guests echo-fn + starter-fn
+   - [ ] 4.5 /routes UI + nav links (Routes/Playground/Apps/Usage) on all pages
+   - [ ] 4.6 accept_phase4.sh ×2 + FULL suite + angry review + ship v2.7
+   - [ ] 5.1 MemLimiter wired on fn/solver stores
+   - [ ] 5.2 judge.rs
+   - [ ] 5.3 problems API + playground UI
+   - [ ] 5.4 /usage page
+   - [ ] 5.5 solver guests
+   - [ ] 5.6 accept_phase5.sh ×2 + FULL suite + angry review + ship v2.8
+   - [ ] 6.1 apps/assets tables + zip upload (zip-slip reject) + serving fallback
+   - [ ] 6.2 apps/hello (Leptos+Trunk)
+   - [ ] 6.3 /apps UI
+   - [ ] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
+   - NEXT: Task 4.1.
+
 ---
 
 ## What exists (file map, all phases)
