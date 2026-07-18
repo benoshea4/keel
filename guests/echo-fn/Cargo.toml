@@ -1,0 +1,25 @@
+# Phase 4 acceptance guest (micro-cloud Task 4.4) — the smallest possible
+# FUNCTION: world `handler`, echoes the request shape back as JSON. Proves the
+# dispatcher's path/query/body plumbing and the ledger.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "echo-fn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:echo-fn"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "handler"

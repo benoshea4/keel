@@ -1,0 +1,26 @@
+# Phase 4 acceptance guest (micro-cloud Task 4.4) — the FUNCTION → WORKFLOW
+# bridge: POST /start begins a durable workflow via platform-api, GET /status
+# relays its JSON. Reused verbatim as the phase-6 app backend (Task 6.2), so
+# keep it boring and clean.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "starter-fn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:starter-fn"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "handler"
