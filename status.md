@@ -45,6 +45,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/load_test.sh                              # must print LOAD TEST PASS (v2.4, 200 wf / cap 8)
 ./scripts/smoke_providers_effectful.sh              # must print EFFECTFUL PROVIDERS SMOKE PASS (v2.5)
 ./scripts/smoke_provider_registry.sh                # must print PROVIDER REGISTRY SMOKE PASS (v2.6)
+./scripts/accept_phase4.sh                          # must print PHASE 4 PASS (micro-cloud functions, v2.7)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -583,7 +584,7 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - [x] 4.3 routes table/API + /fn dispatcher + classify() + ledger
    - [x] 4.4 guests echo-fn + starter-fn
    - [x] 4.5 /routes UI + nav links (Routes/Playground/Apps/Usage) on all pages
-   - [ ] 4.6 accept_phase4.sh ×2 + FULL suite + angry review + ship v2.7
+   - [x] 4.6 accept_phase4.sh ×2 + FULL suite + angry review + ship v2.7
    - [ ] 5.1 MemLimiter wired on fn/solver stores
    - [ ] 5.2 judge.rs
    - [ ] 5.3 problems API + playground UI
@@ -594,7 +595,42 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - [ ] 6.2 apps/hello (Leptos+Trunk)
    - [ ] 6.3 /apps UI
    - [ ] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
-   - NEXT: Task 4.6.
+   - NEXT: Task 5.1 (verify MemLimiter wiring — it was wired early in 4.2's
+     invoke_handler, see phase-4 record below — then 5.2 judge.rs).
+
+   PHASE 4 RECORD (v2.7, 2026-07-18) — all six tasks landed, one commit each:
+   - **Fuel + retick (4.1)**: consume_fuel(true) on the one Engine; ticker
+     1s→100ms; provider budgets rescaled ×10 (semantics unchanged, "~10s");
+     provider stores get a PROVIDER_FUEL=10^13 backstop (spec predates
+     providers); workflow OutOfFuel → failed "runaway guest: exhausted
+     compute budget" checked BEFORE the generic trap arm. Cancel callback
+     kept (deviation from ext spec's deadline(10^12)+trap — cancel needs the
+     callback; effect identical, and cancel latency improved to 100ms).
+   - **WIT 0.7.0 (4.2)**: platform-api interface + handler world (records
+     INLINE in the world — package-level types aren't valid WIT; the ext
+     spec's snippet placement adjusted) + solver world. Existing guests
+     rebuild untouched. db::workflow_json shared by API + get-workflow.
+   - **Dispatcher (4.3)**: longest-prefix match on SEGMENT BOUNDARIES
+     (/fn/echo never captures /fn/echo2 — the spec's "ensure leading /"
+     case is vacuous by construction); 10 MiB cap via manual to_bytes (the
+     2MB axum default does NOT apply to raw-body reads — verified 3MB ok,
+     11MB→413); ledger row inside invoke_handler so no caller can forget
+     it. Engine-level failures (module missing/compile error) are 500s
+     WITHOUT ledger rows — the ledger records sandbox invocations, not
+     engine faults (deliberate reading of "always insert").
+   - **MemLimiter wired EARLY (5.1 pulled into 4.2)**: function stores
+     without any limiter would have UNLIMITED memory — worse than early
+     wiring. Task 5.1 is now a verification checkbox.
+   - **Angry-review probes (all pass, live)**: control plane 401 tokenless
+     while data plane (/fn/*) stays 200 WITH a token set (documented in
+     operations.md — deliberate; don't bind what you wouldn't expose);
+     exact-prefix hit gives guest path "/"; boundary 404; body caps.
+   - **Lesson**: `kill %1` is a NO-OP in non-interactive shells (job control
+     off) — probes left zombie engines holding :8080 twice. Kill by PID ($!)
+     or lsof -ti :8080 | xargs kill -9. The gate scripts already do this.
+   - **Gates**: PHASE 4 PASS ×2 from clean; FULL 16-script suite green after
+     (accept_phase4.sh joined CI); clippy -D warnings; 37 unit tests (2 new:
+     classify order, limiter peak/deny).
 
 ---
 

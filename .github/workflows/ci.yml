@@ -69,6 +69,8 @@ jobs:
         run: ./scripts/smoke_provider_registry.sh
       - name: KV-versioning upgrade smoke (v2.3)
         run: ./scripts/smoke_kv_upgrade.sh
+      - name: Micro-cloud phase 4 — functions + workflow bridge (v2.7)
+        run: ./scripts/accept_phase4.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

@@ -16,6 +16,7 @@ Flags that matter in production:
 | `--api-token` / `KEEL_API_TOKEN` | unset (open mode) | Operator bearer token. Set it for anything beyond loopback; prefer the env var (argv is world-readable). |
 | `--max-running` | 256 | Worker-thread cap. Parked workflows hold a slot — size generously. |
 | `--max-guest-memory-mb` | 256 | Per-workflow linear-memory cap. |
+| `--wf-fuel-limit` | 10^13 | Micro-cloud phase 4 — per-run/resume workflow fuel budget (a runaway kill-switch, not a quota). An infinite loop fails with `runaway guest: exhausted compute budget`; parked workflows spend zero; replay resets to the full budget. Raise it only if a legitimate very-long replay ever trips it. |
 | `--retain-terminal-hours` | 0 (keep forever) | GC completed/failed workflows (journal, events, snapshots, kv included) after this many hours. |
 | `--backup-dir` + `--backup-interval-secs` + `--backup-keep` | off / 300 / 24 | Periodic online snapshots (below). |
 | `--secrets-file` | unset | KEY=VALUE file backing the `secret` host call (below). |
@@ -36,6 +37,12 @@ Flags that matter in production:
 
 API clients send `Authorization: Bearer <token>`; the UI logs in at `/login`
 (the cookie stores a digest, never the token; `/logout` clears it).
+
+Micro-cloud surfaces split into two planes: the CONTROL plane (`/api/*`, the
+UI) honors the token like everything else, but the DATA plane — `/fn/*`
+function calls and phase-6 `/apps/*` serving — is deliberately public even
+with a token set: a browser-served app must reach its own backend tokenless.
+Don't bind a function you wouldn't expose to whoever can reach the listener.
 
 ## Secrets
 

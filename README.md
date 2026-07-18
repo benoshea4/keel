@@ -12,6 +12,13 @@ fleet tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md) ·
 [capability providers](PROVIDERS.md) (pure sandboxes, or — since v2.5 —
 effectful connectors whose every wire call is journaled individually).
 
+Since v2.7 Keel is growing into a **single-binary micro-cloud**
+([SPEC-MICROCLOUD.md](SPEC-MICROCLOUD.md)): stateless serverless functions
+bound to `/fn/<name>` prefixes — fresh sandboxed instance per request,
+fuel/memory/time quotas, a usage ledger for every invocation — that can start
+and query durable workflows through the same process. Lambda + Step
+Functions, one binary, one SQLite file.
+
 **Embeddable, literally** (since v2.2 the engine is a library, `keel-core`,
 and the server is one consumer of it):
 
@@ -118,11 +125,17 @@ curl -s -X POST localhost:8080/api/workflows/<id>/cancel     # -> 200
 
 Parked workflows abort immediately at their park point. Guests spinning in pure
 wasm (`loop {}`) are stopped too: the engine runs wasmtime epoch interruption
-with a 1-second tick, and an abort flag traps the guest at the next tick. The one
+with a 100ms tick, and an abort flag traps the guest at the next tick. The one
 gap: a guest blocked inside a long host call (an in-flight HTTP GET) can't be
 interrupted mid-call — cancel answers 409, retry once the call returns.
 `scripts/smoke_cancel.sh` proves both paths against `guests/counter` (parked)
 and `guests/spin` (spinning).
+
+Runaway workflows also die on their own: every run/resume gets a fuel budget
+(`--wf-fuel-limit`, default 10^13 instructions ≈ minutes of continuous
+compute). An infinite loop exhausts it and fails with `runaway guest:
+exhausted compute budget`; parked workflows spend zero, and replay resets to
+the full budget so it can never trip a limit the original run survived.
 
 ## Tests
 

@@ -15,6 +15,10 @@ urlencoded/multipart body shape.
 | `POST /api/providers?name=<n>&tier=pure\|effectful` *(also multipart: `file`, `name`, `tier`; v2.6)* | Body = provider component bytes, pre-flighted for the TIER at the door (wrong world/imports → 400, never a workflow failure) → `{"hash"}`. The swap is LIVE: the next `provider-call` uses it; recorded journal rows replay unchanged. With `&hash=<h>` and no body: REBIND the name to an already-stored blob (rollback; 404 if unknown hash). See [PROVIDERS.md](../PROVIDERS.md). |
 | `GET /api/providers` | Registry bindings: `[{name, tier, hash, updated_at}]`. |
 | `DELETE /api/providers/{name}` | Unbind (the blob stays for rebind). Later calls to the name err as unregistered — data, journaled. 404 if not bound. |
+| `POST /api/routes` *(micro-cloud phase 4)* | `{"prefix":"/fn/echo","module_hash":"...", "fuel_limit"?, "mem_limit"?, "time_limit_ms"?}` → 201. Binds a URL prefix to a `handler`-world FUNCTION component (stateless, sandboxed per request). Re-POSTing a prefix re-binds it. Prefix rules: starts `/fn/`, no trailing slash, no `..`. Defaults: fuel 5×10⁸, mem 64 MiB, time 5000 ms. |
+| `GET /api/routes` | All bindings with quotas: `[{prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at}]`. |
+| `DELETE /api/routes/{prefix}` | Unbind → 204 (404 if not bound). |
+| `ANY /fn/*` *(PUBLIC — no token)* | The function data plane: longest-prefix match against bound routes, fresh sandboxed instance per request, body capped at 10 MiB (413). Outcome ≠ ok → 500 `{"outcome":"tle"\|"mle"\|"oof"\|"trap"}`. Every invocation (failures included) writes a `invocations` usage-ledger row. |
 
 ## Workflows
 

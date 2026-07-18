@@ -1,9 +1,14 @@
 # Writing Keel guests
 
 A guest is a WASM **component** (component model, `wasm32-unknown-unknown`)
-implementing the `workflow` world in [`wit/workflow.wit`](../wit/workflow.wit).
-Start by copying `guests/demo/` — its `Cargo.toml` carries the required
-`[package.metadata.component]` block. Build with:
+implementing one of the worlds in [`wit/workflow.wit`](../wit/workflow.wit):
+`workflow` (durable, journaled — this document), `handler` (micro-cloud
+phase 4: a stateless FUNCTION — fresh instance per HTTP request, direct
+now/random, no journal; copy `guests/echo-fn` or `guests/starter-fn`, set
+`world = "handler"`, and note the workflow rules below do NOT apply), or
+`solver` (phase 5: import-free judge submissions).
+Workflow guests: start by copying `guests/demo/` — its `Cargo.toml` carries
+the required `[package.metadata.component]` block. Build with:
 
 ```bash
 cargo component build --release --target wasm32-unknown-unknown
@@ -66,8 +71,11 @@ guest whose every effect replays.)
   are stored verbatim by design. Use high-entropy secrets.
 - **1 MiB body cap is silent:** oversized HTTP responses arrive truncated with
   no marker. If you expect big payloads, check for your own terminator.
-- **Guests that spin forever** (`loop {}`) burn a core until someone calls
-  `POST .../cancel` — the epoch tick makes cancel work, not spinning cheap.
+- **Guests that spin forever** (`loop {}`) die on their own: the per-run fuel
+  budget (`--wf-fuel-limit`, default ~minutes of continuous compute) fails
+  them with `runaway guest: exhausted compute budget`. `POST .../cancel`
+  still stops one sooner — the epoch tick makes cancel prompt, fuel makes
+  runaways finite.
 - **WIT versions:** rebuilding against a newer `workflow.wit` is usually just a
   rebuild (`bindings.rs` regenerates), but *already-uploaded blobs* keyed to an
   old 0.x interface won't instantiate on a newer engine — re-upload after
