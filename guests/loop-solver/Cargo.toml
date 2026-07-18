@@ -1,0 +1,21 @@
+# Phase 5 TLE fodder (micro-cloud Task 5.5): solve() never returns. The epoch
+# deadline (2000ms of 100ms ticks) traps it — the judge must resolve in
+# seconds, not hang.
+
+[package]
+name = "loop-solver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:loop-solver"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "solver"

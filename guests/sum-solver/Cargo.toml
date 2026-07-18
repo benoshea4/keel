@@ -1,0 +1,27 @@
+# Phase 5 acceptance solver (micro-cloud Task 5.5) — world `solver`, ZERO
+# imports. Input: first line N, second line N space-separated ints; output:
+# their sum. ONE crate, TWO artifacts (the counter v1/v2 trick):
+#
+#   cargo component build --release --target wasm32-unknown-unknown                    # correct (AC)
+#   cargo component build --release --target wasm32-unknown-unknown --features wrong   # off-by-one (WA)
+
+[package]
+name = "sum-solver"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+wrong = []
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:sum-solver"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "solver"

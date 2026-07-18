@@ -1,0 +1,21 @@
+# Phase 5 MLE fodder (micro-cloud Task 5.5): pushes 1 MiB chunks forever. The
+# MemLimiter refuses growth past the 256 MiB case budget; the failed
+# allocation traps, and the limiter's denied flag classifies it MLE (not RE).
+
+[package]
+name = "hog-solver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:hog-solver"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "solver"
