@@ -71,6 +71,8 @@ jobs:
         run: ./scripts/smoke_kv_upgrade.sh
       - name: Micro-cloud phase 4 — functions + workflow bridge (v2.7)
         run: ./scripts/accept_phase4.sh
+      - name: Micro-cloud phase 5 — judge + metering + runaway watchdog (v2.8)
+        run: ./scripts/accept_phase5.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

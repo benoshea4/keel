@@ -19,6 +19,9 @@ urlencoded/multipart body shape.
 | `GET /api/routes` | All bindings with quotas: `[{prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at}]`. |
 | `DELETE /api/routes/{prefix}` | Unbind → 204 (404 if not bound). |
 | `ANY /fn/*` *(PUBLIC — no token)* | The function data plane: longest-prefix match against bound routes, fresh sandboxed instance per request, body capped at 10 MiB (413). Outcome ≠ ok → 500 `{"outcome":"tle"\|"mle"\|"oof"\|"trap"}`. Every invocation (failures included) writes a `invocations` usage-ledger row. |
+| `POST /api/problems` *(phase 5)* | Idempotent operator seeding: `{"slug","title","statement","cases":[{"input","expected"},…]}` — the case list is replaced atomically. |
+| `POST /api/submissions` | Judge a solver against a problem. JSON `{"problem","module_hash"}`, or multipart `problem`+`file` (stores the module first). → 202 `{"id"}`; judging runs off-thread. Per-case quotas: 10⁹ fuel, 256 MiB, 2000 ms. Verdicts: AC · WA · TLE · MLE · OOF · RE; stops at first non-AC; each case writes a `solve` ledger row. |
+| `GET /api/submissions/{id}` | `{"verdict"}` is null while judging; `detail` = per-case JSON (verdict, fuel, peak_mem, ms). |
 
 ## Workflows
 

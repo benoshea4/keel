@@ -46,6 +46,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_providers_effectful.sh              # must print EFFECTFUL PROVIDERS SMOKE PASS (v2.5)
 ./scripts/smoke_provider_registry.sh                # must print PROVIDER REGISTRY SMOKE PASS (v2.6)
 ./scripts/accept_phase4.sh                          # must print PHASE 4 PASS (micro-cloud functions, v2.7)
+./scripts/accept_phase5.sh                          # must print PHASE 5 PASS (judge + metering + watchdog, v2.8)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -585,18 +586,43 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - [x] 4.4 guests echo-fn + starter-fn
    - [x] 4.5 /routes UI + nav links (Routes/Playground/Apps/Usage) on all pages
    - [x] 4.6 accept_phase4.sh ×2 + FULL suite + angry review + ship v2.7
-   - [ ] 5.1 MemLimiter wired on fn/solver stores
-   - [ ] 5.2 judge.rs
-   - [ ] 5.3 problems API + playground UI
-   - [ ] 5.4 /usage page
-   - [ ] 5.5 solver guests
-   - [ ] 5.6 accept_phase5.sh ×2 + FULL suite + angry review + ship v2.8
+   - [x] 5.1 MemLimiter wired on fn/solver stores
+   - [x] 5.2 judge.rs
+   - [x] 5.3 problems API + playground UI
+   - [x] 5.4 /usage page
+   - [x] 5.5 solver guests
+   - [x] 5.6 accept_phase5.sh ×2 + FULL suite + angry review + ship v2.8
    - [ ] 6.1 apps/assets tables + zip upload (zip-slip reject) + serving fallback
    - [ ] 6.2 apps/hello (Leptos+Trunk)
    - [ ] 6.3 /apps UI
    - [ ] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
-   - NEXT: Task 5.1 (verify MemLimiter wiring — it was wired early in 4.2's
-     invoke_handler, see phase-4 record below — then 5.2 judge.rs).
+   - NEXT: Task 6.1 (apps/assets tables + zip upload + serving fallback);
+     install trunk first (`cargo install --locked trunk`), then 6.2 hello app.
+
+   PHASE 5 RECORD (v2.8, 2026-07-18):
+   - **Judge (5.2)**: judge.rs = bindgen #4 (world solver, EMPTY linker — the
+     sandbox is "cannot name a capability"); per-case 10^9 fuel / 256 MiB /
+     2000ms consts; classify() reused verbatim; guest-returned Err → RE with
+     ledger outcome guest_error; stop at first non-AC; ONE verdict UPDATE.
+   - **THE loop-solver LESSON**: a bare `loop {}` is OOF fodder (burns 1e9
+     fuel in <1s), and the first "unoptimizable" memcpy loop got REDUCED TO
+     `loop {}` by LLVM (copying 1s over 1s then testing for 0 is provably
+     unobservable — the 64MB buffer never even allocated; caught because the
+     ledger showed peak_mem 1.1MB with 1e9 fuel in 813ms). Fix: black_box on
+     both sides of an 8MiB copy_within → memory.copy is ~1 fuel but real
+     wall time → TLE ×3 with byte-identical fuel (802) — fuel determinism
+     visible in the ledger. Diagnosing from the ledger (fuel/peak/ms) rather
+     than the verdict is exactly what the meter is FOR.
+   - **5.3/5.4**: dual-shape POST /api/submissions (JSON or multipart
+     upload-and-judge in one call); verdict badges map onto the FIVE existing
+     status classes (style.css says resist additions): AC=completed
+     WA=running TLE=sleeping MLE=waiting_event RE/OOF=failed; /usage =
+     totals-by-module + newest 100, polled.
+   - **Gate**: PHASE 5 PASS ×2 from clean — AC (detail: 2 cases, fuel>0,
+     2 solve ledger rows), WA, TLE resolves ~2s, MLE, function-side oof via
+     starved rebind (fuel_limit=1000 → 500 {"outcome":"oof"} + ledger row),
+     spin workflow under --wf-fuel-limit 10^7 → failed "compute budget" with
+     the engine still healthy. Full 17-script suite green after.
 
    PHASE 4 RECORD (v2.7, 2026-07-18) — all six tasks landed, one commit each:
    - **Fuel + retick (4.1)**: consume_fuel(true) on the one Engine; ticker

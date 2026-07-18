@@ -1,0 +1,23 @@
+# Phase 6 (micro-cloud Task 6.2) — the flagship demo frontend: Leptos CSR
+# compiled to WASM by Trunk, served BY KEEL from the assets table, calling its
+# own backend function via relative ./api/* URLs. A NORMAL Rust crate (not
+# cargo-component; Trunk drives the build):
+#
+#   cd apps/hello && trunk build --release
+#   (cd dist && zip -r ../hello.zip .)
+#
+# gloo-timers (futures) is the 1s poll delay — the spec's dep list implies it
+# via "polls every second"; there is no other way to sleep in wasm.
+
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+leptos = { version = "0.7", features = ["csr"] }
+gloo-net = "0.6"
+gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen-futures = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
