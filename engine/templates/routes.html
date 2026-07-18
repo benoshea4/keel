@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — routes</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Routes</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a><a href="/routes">Routes</a><a href="/playground">Playground</a><a href="/apps">Apps</a><a href="/usage">Usage</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  <h2>Bind route</h2>
+  {# Urlencoded form → api::create_route (dual-shape, like schedules). The
+     prefix must start with /fn/; re-binding an existing prefix updates it. #}
+  <form action="/api/routes" method="post">
+    <label for="prefix">Prefix (starts with /fn/, no trailing slash)</label>
+    <input id="prefix" name="prefix" placeholder="/fn/echo" required>
+    <label for="module_hash">Module hash (upload on the Modules page first)</label>
+    <input id="module_hash" name="module_hash" placeholder="sha256 hex" required>
+    <label for="fuel_limit">Fuel limit (blank = 500000000)</label>
+    <input id="fuel_limit" name="fuel_limit" inputmode="numeric">
+    <label for="mem_limit">Memory limit, bytes (blank = 64 MiB)</label>
+    <input id="mem_limit" name="mem_limit" inputmode="numeric">
+    <label for="time_limit_ms">Time limit, ms (blank = 5000)</label>
+    <input id="time_limit_ms" name="time_limit_ms" inputmode="numeric">
+    <button type="submit">Bind route</button>
+  </form>
+
+  <h2>Bound routes</h2>
+  <table>
+    <thead>
+      <tr><th>Prefix</th><th>Module</th><th>Fuel</th><th>Mem</th><th>Time&nbsp;ms</th><th>Invocations</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% if routes.is_empty() %}
+      <tr><td colspan="7">No routes bound — bind a handler-world component above, then curl its prefix.</td></tr>
+      {% endif %}
+      {% for r in routes %}
+      <tr>
+        <td><code>{{ r.prefix }}</code></td>
+        <td><code title="{{ r.hash }}">{{ r.short_hash }}</code></td>
+        <td>{{ r.fuel }}</td>
+        <td>{{ r.mem }}</td>
+        <td>{{ r.time_ms }}</td>
+        <td>{{ r.invocations }}</td>
+        <td><button hx-delete="/api/routes{{ r.prefix }}" hx-swap="none"
+                    hx-confirm="Remove route '{{ r.prefix }}'? Requests to it will 404."
+                    onclick="setTimeout(() => location.reload(), 300)">Remove route</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

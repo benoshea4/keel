@@ -431,6 +431,8 @@ async fn serve(
         // v2.4 — schedules UI (create/pause/resume/delete + 2s polling).
         .route("/schedules", get(ui::schedules_page))
         .route("/providers", get(ui::providers_page))
+        // Micro-cloud phase 4 — routes UI (Playground/Apps/Usage land in 5/6).
+        .route("/routes", get(ui::routes_page))
         .route("/partials/schedules", get(ui::schedules_partial))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))

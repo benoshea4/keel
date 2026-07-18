@@ -795,8 +795,36 @@ pub async fn get_journal(
 /// slash, no "..".
 pub async fn create_route(
     State(shared): State<Arc<EngineShared>>,
-    Json(body): Json<Value>,
+    req: Request,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    // Same dual-shape story as create_schedule: JSON from scripts/curl, a
+    // urlencoded form from the /routes page. Empty form limit fields = defaults.
+    let body: Value = if content_type(&req).starts_with("application/x-www-form-urlencoded") {
+        let Form(f) = Form::<HashMap<String, String>>::from_request(req, &())
+            .await
+            .map_err(bad)?;
+        let mut v = serde_json::Map::new();
+        for (k, val) in f {
+            if val.is_empty() {
+                continue;
+            }
+            match k.as_str() {
+                "fuel_limit" | "mem_limit" | "time_limit_ms" => {
+                    v.insert(
+                        k,
+                        Value::from(val.parse::<i64>().map_err(|_| bad("limits must be integers"))?),
+                    );
+                }
+                _ => {
+                    v.insert(k, Value::from(val));
+                }
+            }
+        }
+        Value::Object(v)
+    } else {
+        let Json(j) = Json::<Value>::from_request(req, &()).await.map_err(bad)?;
+        j
+    };
     let prefix = body
         .get("prefix")
         .and_then(Value::as_str)

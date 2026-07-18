@@ -1090,6 +1090,16 @@ pub fn delete_route(c: &Connection, prefix: &str) -> Result<bool> {
     Ok(c.execute("DELETE FROM routes WHERE prefix = ?1", [prefix])? > 0)
 }
 
+/// Ledger rollup for the routes page: (ref, row count) for one kind.
+pub fn invocation_counts(c: &Connection, kind: &str) -> Result<Vec<(String, i64)>> {
+    let mut stmt =
+        c.prepare("SELECT ref, COUNT(*) FROM invocations WHERE kind = ?1 GROUP BY ref")?;
+    let rows = stmt
+        .query_map([kind], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// The usage ledger (ext spec Task 4.3 step 6): one row per function/solver
 /// invocation, written on EVERY outcome — metering that only counts successes
 /// is fiction. fuel/peak are Options because a store that failed setup has

@@ -198,6 +198,24 @@ struct ProvRow {
     updated: String,
 }
 
+/// Micro-cloud phase 4 — one bound route, with its ledger count.
+struct RouteUiRow {
+    prefix: String,
+    short_hash: String,
+    hash: String,
+    fuel: i64,
+    mem: i64,
+    time_ms: i64,
+    invocations: i64,
+}
+
+#[derive(Template)]
+#[template(path = "routes.html")]
+struct RoutesPage {
+    routes: Vec<RouteUiRow>,
+    authed: bool,
+}
+
 #[derive(Template)]
 #[template(path = "providers.html")]
 struct ProvidersPage {
@@ -463,6 +481,35 @@ pub async fn providers_page(
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     render(ProvidersPage {
         providers: prov_rows(&conn)?,
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// Micro-cloud phase 4 — GET /routes: bound prefixes + quotas + ledger counts.
+pub async fn routes_page(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let counts: std::collections::HashMap<String, i64> =
+        db::invocation_counts(&conn, "function")
+            .map_err(internal)?
+            .into_iter()
+            .collect();
+    let routes = db::list_routes(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|r| RouteUiRow {
+            invocations: counts.get(&r.prefix).copied().unwrap_or(0),
+            short_hash: short(&r.module_hash),
+            hash: r.module_hash,
+            prefix: r.prefix,
+            fuel: r.fuel_limit,
+            mem: r.mem_limit,
+            time_ms: r.time_limit_ms,
+        })
+        .collect();
+    render(RoutesPage {
+        routes,
         authed: shared.api_token.is_some(),
     })
 }
