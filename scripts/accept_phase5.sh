@@ -124,7 +124,7 @@ WFID=$(curl -s -X POST localhost:8080/api/workflows -H 'content-type: applicatio
   -d "{\"module_hash\":\"$H_SPIN\",\"input\":{}}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 for i in $(seq 1 30); do
-  st=$(sqlite3 $DB "SELECT status FROM workflows WHERE id='$WFID'")
+  st=$(sqlite3 -cmd ".timeout 5000" $DB "SELECT status FROM workflows WHERE id='$WFID'")
   [ "$st" = "failed" ] && break
   sleep 1
 done

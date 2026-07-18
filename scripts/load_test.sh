@@ -65,23 +65,23 @@ for i in $(seq 1 300); do
       echo "FAIL: keel_active_permits=$P exceeds --max-running $MAXR"; exit 1
     fi
   fi
-  DONE=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE status='completed'")
+  DONE=$(sqlite3 -cmd ".timeout 5000" $DB "SELECT COUNT(*) FROM workflows WHERE status='completed'")
   [ "$DONE" = "$N" ] && break
   sleep 0.2
 done
 
-DONE=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE status='completed'")
-FAILED=$(sqlite3 $DB "SELECT COUNT(*) FROM workflows WHERE status='failed'")
+DONE=$(sqlite3 -cmd ".timeout 5000" $DB "SELECT COUNT(*) FROM workflows WHERE status='completed'")
+FAILED=$(sqlite3 -cmd ".timeout 5000" $DB "SELECT COUNT(*) FROM workflows WHERE status='failed'")
 [ "$DONE" = "$N" ] || { echo "FAIL: $DONE/$N completed ($FAILED failed) after 60s"; exit 1; }
 [ "$PEAK" -eq "$MAXR" ] || { echo "FAIL: permit peak was $PEAK, never reached the cap $MAXR — no real contention"; exit 1; }
 
 # journal integrity: dense seqs from 0 for every workflow (these never
 # checkpoint, so COUNT == MAX+1 exactly), and exactly one http-get row each
-BAD=$(sqlite3 $DB "SELECT COUNT(*) FROM (
+BAD=$(sqlite3 -cmd ".timeout 5000" $DB "SELECT COUNT(*) FROM (
   SELECT workflow_id FROM journal GROUP BY workflow_id
   HAVING COUNT(*) != MAX(seq) + 1)")
 [ "$BAD" = "0" ] || { echo "FAIL: $BAD workflows have gapped journals"; exit 1; }
-NJ=$(sqlite3 $DB "SELECT COUNT(*) FROM journal WHERE kind='http-get'")
+NJ=$(sqlite3 -cmd ".timeout 5000" $DB "SELECT COUNT(*) FROM journal WHERE kind='http-get'")
 [ "$NJ" = "$N" ] || { echo "FAIL: expected $N http-get rows, got $NJ"; exit 1; }
 
 kill $ENG || true; ENG=""
