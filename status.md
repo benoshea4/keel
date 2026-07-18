@@ -596,7 +596,7 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - [x] 6.1 apps/assets tables + zip upload (zip-slip reject) + serving fallback
    - [x] 6.2 apps/hello (Leptos+Trunk)
    - [x] 6.3 /apps UI
-   - [ ] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
+   - [x] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
    - NEXT: 6.4 finale — full 18-gate suite, push, CI, tag v3.0 + release.
      After that the MICRO-CLOUD EXTENSION IS COMPLETE; further work is
      demand-driven only (ROADMAP Next: host-kv, replication, stretch items).
