@@ -15,6 +15,7 @@
 
 mod api;
 mod auth;
+mod dispatch;
 mod fleet;
 mod ui;
 
@@ -393,6 +394,13 @@ async fn serve(
             "/api/providers/{name}",
             axum::routing::delete(api::delete_provider),
         )
+        // Micro-cloud phase 4 — routes CONTROL plane (token-gated; the /fn
+        // data plane mounts after the auth layer below).
+        .route("/api/routes", post(api::create_route).get(api::list_routes))
+        .route(
+            "/api/routes/{*prefix}",
+            axum::routing::delete(api::delete_route),
+        )
         .route(
             "/api/workflows",
             post(api::create_workflow).get(api::list_workflows),
@@ -434,6 +442,11 @@ async fn serve(
             shared.clone(),
             auth::require_auth,
         ))
+        // Micro-cloud phase 4 — the PUBLIC data plane (status.md §N.5): added
+        // AFTER the auth layer, so functions (and later apps) are reachable
+        // tokenless — a browser-served app must call its own backend. The
+        // body cap is enforced inside the dispatcher (10 MiB → 413).
+        .route("/fn/{*rest}", axum::routing::any(dispatch::dispatch_fn))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;

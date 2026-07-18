@@ -784,3 +784,85 @@ pub async fn get_journal(
         .collect();
     Ok(Json(Value::Array(out)))
 }
+
+// --- Micro-cloud phase 4: routes (the control plane; the /fn data plane is
+// --- dispatch.rs). Token-gated like every other /api route.
+
+/// POST /api/routes {"prefix":"/fn/echo","module_hash":"...", optional
+/// fuel_limit/mem_limit/time_limit_ms} → 201. Re-POSTing a prefix re-binds
+/// it (that is how the 5.6 gate lowers /fn/echo's fuel to a starvation
+/// budget). Prefix rules (ext spec Task 4.3): starts with /fn/, no trailing
+/// slash, no "..".
+pub async fn create_route(
+    State(shared): State<Arc<EngineShared>>,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let prefix = body
+        .get("prefix")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("missing field: prefix"))?;
+    let hash = body
+        .get("module_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("missing field: module_hash"))?;
+    if !prefix.starts_with("/fn/") || prefix.len() <= 4 {
+        return Err(bad("prefix must start with /fn/ and name something after it"));
+    }
+    if prefix.ends_with('/') {
+        return Err(bad("prefix must not end with /"));
+    }
+    if prefix.contains("..") {
+        return Err(bad("prefix must not contain .."));
+    }
+    let fuel = body.get("fuel_limit").and_then(Value::as_i64).unwrap_or(500_000_000);
+    let mem = body.get("mem_limit").and_then(Value::as_i64).unwrap_or(64 * 1024 * 1024);
+    let time_ms = body.get("time_limit_ms").and_then(Value::as_i64).unwrap_or(5000);
+    if fuel <= 0 || mem <= 0 || time_ms <= 0 {
+        return Err(bad("limits must be positive"));
+    }
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if !db::module_exists(&conn, hash).map_err(internal)? {
+        return Err(bad(format!("unknown module hash {hash}")));
+    }
+    db::upsert_route(&conn, prefix, hash, fuel, mem, time_ms).map_err(internal)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "prefix": prefix, "module_hash": hash,
+            "fuel_limit": fuel, "mem_limit": mem, "time_limit_ms": time_ms,
+        })),
+    ))
+}
+
+/// GET /api/routes → every binding with its quotas.
+pub async fn list_routes(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Json<Value>, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let rows = db::list_routes(&conn).map_err(internal)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "prefix": r.prefix, "module_hash": r.module_hash,
+                "fuel_limit": r.fuel_limit, "mem_limit": r.mem_limit,
+                "time_limit_ms": r.time_limit_ms, "created_at": r.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
+}
+
+/// DELETE /api/routes/{*prefix} → 204 / 404. The wildcard arrives without its
+/// leading slash ("fn/echo") — reattach it.
+pub async fn delete_route(
+    State(shared): State<Arc<EngineShared>>,
+    Path(prefix): Path<String>,
+) -> Result<StatusCode, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::delete_route(&conn, &format!("/{prefix}")).map_err(internal)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "no such route".to_string()))
+    }
+}

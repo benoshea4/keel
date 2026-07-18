@@ -1036,6 +1036,60 @@ pub fn resumable_ids(c: &Connection) -> Result<Vec<String>> {
 
 // --- Micro-cloud phases 4-6 (ext spec §E3 tables) --------------------------------
 
+pub struct RouteRow {
+    pub prefix: String,
+    pub module_hash: String,
+    pub fuel_limit: i64,
+    pub mem_limit: i64,
+    pub time_limit_ms: i64,
+    pub created_at: i64,
+}
+
+/// Bind (or re-bind — POST is how the 5.6 gate lowers /fn/echo's fuel) a URL
+/// prefix to a function component with per-route quotas.
+pub fn upsert_route(
+    c: &Connection,
+    prefix: &str,
+    module_hash: &str,
+    fuel_limit: i64,
+    mem_limit: i64,
+    time_limit_ms: i64,
+) -> Result<()> {
+    c.execute(
+        "INSERT INTO routes (prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(prefix) DO UPDATE SET module_hash = excluded.module_hash,
+             fuel_limit = excluded.fuel_limit, mem_limit = excluded.mem_limit,
+             time_limit_ms = excluded.time_limit_ms",
+        rusqlite::params![prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn list_routes(c: &Connection) -> Result<Vec<RouteRow>> {
+    let mut stmt = c.prepare(
+        "SELECT prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at
+         FROM routes ORDER BY prefix",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(RouteRow {
+                prefix: r.get(0)?,
+                module_hash: r.get(1)?,
+                fuel_limit: r.get(2)?,
+                mem_limit: r.get(3)?,
+                time_limit_ms: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn delete_route(c: &Connection, prefix: &str) -> Result<bool> {
+    Ok(c.execute("DELETE FROM routes WHERE prefix = ?1", [prefix])? > 0)
+}
+
 /// The usage ledger (ext spec Task 4.3 step 6): one row per function/solver
 /// invocation, written on EVERY outcome — metering that only counts successes
 /// is fiction. fuel/peak are Options because a store that failed setup has
