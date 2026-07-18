@@ -1249,6 +1249,6 @@ mod tests {
             vec![("greet", false, "h2"), ("relay", true, "h2")]
         );
         assert_eq!(loaded[0].3, b"\0asm-two");
-        assert_eq!(get_provider_blob(&c, "h1").unwrap().is_some(), true);
+        assert!(get_provider_blob(&c, "h1").unwrap().is_some());
     }
 }
