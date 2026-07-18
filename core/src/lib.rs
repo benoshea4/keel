@@ -16,6 +16,7 @@ pub mod db;
 pub mod function;
 pub mod host;
 pub mod journal;
+pub mod judge;
 pub mod notifier;
 pub mod provider;
 pub mod runner;

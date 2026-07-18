@@ -1090,6 +1090,180 @@ pub fn delete_route(c: &Connection, prefix: &str) -> Result<bool> {
     Ok(c.execute("DELETE FROM routes WHERE prefix = ?1", [prefix])? > 0)
 }
 
+/// Phase 5 — problems + cases arrive as one idempotent upsert (the operator
+/// seeding endpoint): the problem row is replaced and its cases are wiped and
+/// re-inserted in one transaction, so a re-seed can never leave a half-old
+/// case list behind.
+pub fn upsert_problem(
+    c: &Connection,
+    slug: &str,
+    title: &str,
+    statement: &str,
+    cases: &[(String, String)],
+) -> Result<()> {
+    c.execute_batch("BEGIN IMMEDIATE")?;
+    let r = (|| -> Result<()> {
+        c.execute(
+            "INSERT INTO problems (slug, title, statement) VALUES (?1, ?2, ?3)
+             ON CONFLICT(slug) DO UPDATE SET title = excluded.title, statement = excluded.statement",
+            rusqlite::params![slug, title, statement],
+        )?;
+        c.execute("DELETE FROM cases WHERE problem = ?1", [slug])?;
+        for (idx, (input, expected)) in cases.iter().enumerate() {
+            c.execute(
+                "INSERT INTO cases (problem, idx, input, expected) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![slug, idx as i64, input, expected],
+            )?;
+        }
+        Ok(())
+    })();
+    match r {
+        Ok(()) => c.execute_batch("COMMIT")?,
+        Err(_) => c.execute_batch("ROLLBACK")?,
+    }
+    r
+}
+
+pub fn list_problems(c: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = c.prepare("SELECT slug, title FROM problems ORDER BY slug")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// (title, statement), or None.
+pub fn get_problem(c: &Connection, slug: &str) -> Result<Option<(String, String)>> {
+    Ok(c.query_row(
+        "SELECT title, statement FROM problems WHERE slug = ?1",
+        [slug],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()?)
+}
+
+/// (idx, input, expected) in idx order — the judging order is the stored order.
+pub fn list_cases(c: &Connection, slug: &str) -> Result<Vec<(i64, String, String)>> {
+    let mut stmt =
+        c.prepare("SELECT idx, input, expected FROM cases WHERE problem = ?1 ORDER BY idx")?;
+    let rows = stmt
+        .query_map([slug], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn insert_submission(c: &Connection, id: &str, problem: &str, module_hash: &str) -> Result<()> {
+    c.execute(
+        "INSERT INTO submissions (id, problem, module_hash, verdict, detail, created_at)
+         VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+        rusqlite::params![id, problem, module_hash, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub struct SubmissionRow {
+    pub id: String,
+    pub problem: String,
+    pub module_hash: String,
+    pub verdict: Option<String>,
+    pub detail: Option<String>,
+    pub created_at: i64,
+}
+
+pub fn get_submission(c: &Connection, id: &str) -> Result<Option<SubmissionRow>> {
+    Ok(c.query_row(
+        "SELECT id, problem, module_hash, verdict, detail, created_at
+         FROM submissions WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(SubmissionRow {
+                id: r.get(0)?,
+                problem: r.get(1)?,
+                module_hash: r.get(2)?,
+                verdict: r.get(3)?,
+                detail: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        },
+    )
+    .optional()?)
+}
+
+/// One UPDATE at the end of judging (ext spec Task 5.2 step 4).
+pub fn set_submission_verdict(c: &Connection, id: &str, verdict: &str, detail: &str) -> Result<()> {
+    c.execute(
+        "UPDATE submissions SET verdict = ?2, detail = ?3 WHERE id = ?1",
+        rusqlite::params![id, verdict, detail],
+    )?;
+    Ok(())
+}
+
+pub fn list_submissions(c: &Connection, problem: &str) -> Result<Vec<SubmissionRow>> {
+    let mut stmt = c.prepare(
+        "SELECT id, problem, module_hash, verdict, detail, created_at
+         FROM submissions WHERE problem = ?1 ORDER BY created_at DESC LIMIT 50",
+    )?;
+    let rows = stmt
+        .query_map([problem], |r| {
+            Ok(SubmissionRow {
+                id: r.get(0)?,
+                problem: r.get(1)?,
+                module_hash: r.get(2)?,
+                verdict: r.get(3)?,
+                detail: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub struct InvocationRow {
+    pub kind: String,
+    pub refname: String,
+    pub module_hash: String,
+    pub outcome: String,
+    pub fuel_used: Option<i64>,
+    pub peak_mem: Option<i64>,
+    pub duration_ms: i64,
+    pub created_at: i64,
+}
+
+/// Phase 5 — the /usage page: newest 100 ledger rows.
+pub fn recent_invocations(c: &Connection) -> Result<Vec<InvocationRow>> {
+    let mut stmt = c.prepare(
+        "SELECT kind, ref, module_hash, outcome, fuel_used, peak_mem, duration_ms, created_at
+         FROM invocations ORDER BY id DESC LIMIT 100",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(InvocationRow {
+                kind: r.get(0)?,
+                refname: r.get(1)?,
+                module_hash: r.get(2)?,
+                outcome: r.get(3)?,
+                fuel_used: r.get(4)?,
+                peak_mem: r.get(5)?,
+                duration_ms: r.get(6)?,
+                created_at: r.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Phase 5 — /usage totals: (module_hash, invocations, total fuel).
+pub fn usage_totals(c: &Connection) -> Result<Vec<(String, i64, i64)>> {
+    let mut stmt = c.prepare(
+        "SELECT module_hash, COUNT(*), COALESCE(SUM(fuel_used), 0)
+         FROM invocations GROUP BY module_hash ORDER BY 3 DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Ledger rollup for the routes page: (ref, row count) for one kind.
 pub fn invocation_counts(c: &Connection, kind: &str) -> Result<Vec<(String, i64)>> {
     let mut stmt =
