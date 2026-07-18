@@ -1022,3 +1022,91 @@ pub async fn get_submission(
         "created_at": s.created_at,
     })))
 }
+
+// --- Micro-cloud phase 6: hosted apps (control plane; serving is dispatch.rs)
+
+/// POST /api/apps `{"name","backend_hash"?}` → 201. Name is `[a-z0-9-]{1,32}`;
+/// a null/absent backend makes a static-only app; re-POSTing re-binds.
+pub async fn create_app(
+    State(shared): State<Arc<EngineShared>>,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("missing field: name"))?;
+    if name.is_empty()
+        || name.len() > 32
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(bad("app name must be [a-z0-9-]{1,32}"));
+    }
+    let backend = body.get("backend_hash").and_then(Value::as_str);
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if let Some(h) = backend {
+        if !db::module_exists(&conn, h).map_err(internal)? {
+            return Err(bad(format!("unknown module hash {h}")));
+        }
+    }
+    db::upsert_app(&conn, name, backend).map_err(internal)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"name": name, "backend_hash": backend})),
+    ))
+}
+
+/// POST /api/apps/{name}/assets — body = a zip of the app's dist/. Zip-slip
+/// entries (`..` or absolute paths) are a 400 and nothing is stored from the
+/// bundle before them; directories are skipped; `.wasm`/`.js` content types
+/// are forced (browsers refuse WASM served with the wrong type).
+pub async fn upload_assets(
+    State(shared): State<Arc<EngineShared>>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::get_app(&conn, &name).map_err(internal)?.is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("no app '{name}'")));
+    }
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body.to_vec()))
+        .map_err(|e| bad(format!("not a readable zip: {e}")))?;
+    // Validate EVERY entry before storing ANY — a bundle with one slip entry
+    // stores nothing (all-or-nothing beats half-a-deploy).
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| bad(format!("zip entry {i}: {e}")))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let raw = entry.name().replace('\\', "/");
+        if raw.split('/').any(|seg| seg == "..") || raw.starts_with('/') {
+            return Err(bad(format!(
+                "zip entry '{raw}' escapes the bundle (zip-slip) — rejected"
+            )));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes)
+            .map_err(|e| bad(format!("reading zip entry '{raw}': {e}")))?;
+        entries.push((raw, bytes));
+    }
+    let stored = entries.len();
+    for (path, bytes) in entries {
+        // Trust but verify the two types browsers actually enforce.
+        let ct = if path.ends_with(".wasm") {
+            "application/wasm".to_string()
+        } else if path.ends_with(".js") {
+            "text/javascript".to_string()
+        } else {
+            mime_guess::from_path(&path)
+                .first_raw()
+                .unwrap_or("application/octet-stream")
+                .to_string()
+        };
+        db::upsert_asset(&conn, &name, &path, &ct, &bytes).map_err(internal)?;
+    }
+    Ok(Json(json!({"stored": stored})))
+}

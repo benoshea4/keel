@@ -24,6 +24,9 @@ anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
+# Micro-cloud phase 6 — app asset bundles (zip upload) + content types.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+mime_guess = "2"
 clap = { version = "4", features = ["derive", "env"] }   # env: KEEL_API_TOKEN (v1.1 auth)
 askama = "0.12"          # phase 2 (templates); unused until Task 2.8
 tracing = "0.1"

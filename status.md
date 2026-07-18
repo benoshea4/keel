@@ -622,7 +622,10 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
      2 solve ledger rows), WA, TLE resolves ~2s, MLE, function-side oof via
      starved rebind (fuel_limit=1000 → 500 {"outcome":"oof"} + ledger row),
      spin workflow under --wf-fuel-limit 10^7 → failed "compute budget" with
-     the engine still healthy. Full 17-script suite green after.
+     the engine still healthy. Full 17-script suite green after. The suite
+     must run on an IDLE machine: a parallel `cargo install trunk` compile
+     pegged the cores and blew smoke_providers_effectful's timing windows
+     (standalone rerun passed) — never overlap heavy builds with the gates.
 
    PHASE 4 RECORD (v2.7, 2026-07-18) — all six tasks landed, one commit each:
    - **Fuel + retick (4.1)**: consume_fuel(true) on the one Engine; ticker

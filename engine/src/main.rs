@@ -401,6 +401,14 @@ async fn serve(
             "/api/routes/{*prefix}",
             axum::routing::delete(api::delete_route),
         )
+        // Micro-cloud phase 6 — hosted apps (control plane; serving is public
+        // below). 64 MiB zip bundles.
+        .route("/api/apps", post(api::create_app))
+        .route(
+            "/api/apps/{name}/assets",
+            post(api::upload_assets).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route("/apps", get(ui::apps_page))
         // Micro-cloud phase 5 — the playground judge (control plane).
         .route("/api/problems", post(api::upsert_problem))
         .route(
@@ -462,6 +470,8 @@ async fn serve(
         // tokenless — a browser-served app must call its own backend. The
         // body cap is enforced inside the dispatcher (10 MiB → 413).
         .route("/fn/{*rest}", axum::routing::any(dispatch::dispatch_fn))
+        // Phase 6 — app serving: assets + SPA fallback + api/* backend calls.
+        .route("/apps/{*full}", axum::routing::any(dispatch::serve_app))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;

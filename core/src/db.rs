@@ -1264,6 +1264,68 @@ pub fn usage_totals(c: &Connection) -> Result<Vec<(String, i64, i64)>> {
     Ok(rows)
 }
 
+/// Phase 6 — a hosted app: a name, an optional backend function, and a pile
+/// of assets. Re-POSTing a name re-binds its backend (like routes).
+pub fn upsert_app(c: &Connection, name: &str, backend_hash: Option<&str>) -> Result<()> {
+    c.execute(
+        "INSERT INTO apps (name, backend_hash, created_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(name) DO UPDATE SET backend_hash = excluded.backend_hash",
+        rusqlite::params![name, backend_hash, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// Some(backend_hash) if the app exists (inner None = static-only app).
+pub fn get_app(c: &Connection, name: &str) -> Result<Option<Option<String>>> {
+    Ok(c.query_row(
+        "SELECT backend_hash FROM apps WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// One /apps-page row: (name, backend_hash, asset_count, created_at).
+pub type AppListRow = (String, Option<String>, i64, i64);
+
+pub fn list_apps(c: &Connection) -> Result<Vec<AppListRow>> {
+    let mut stmt = c.prepare(
+        "SELECT a.name, a.backend_hash,
+                (SELECT COUNT(*) FROM assets WHERE app = a.name), a.created_at
+         FROM apps a ORDER BY a.name",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn upsert_asset(
+    c: &Connection,
+    app: &str,
+    path: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    c.execute(
+        "INSERT INTO assets (app, path, content_type, bytes) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(app, path) DO UPDATE SET content_type = excluded.content_type,
+             bytes = excluded.bytes",
+        rusqlite::params![app, path, content_type, bytes],
+    )?;
+    Ok(())
+}
+
+/// (content_type, bytes), or None.
+pub fn get_asset(c: &Connection, app: &str, path: &str) -> Result<Option<(String, Vec<u8>)>> {
+    Ok(c.query_row(
+        "SELECT content_type, bytes FROM assets WHERE app = ?1 AND path = ?2",
+        rusqlite::params![app, path],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()?)
+}
+
 /// Ledger rollup for the routes page: (ref, row count) for one kind.
 pub fn invocation_counts(c: &Connection, kind: &str) -> Result<Vec<(String, i64)>> {
     let mut stmt =

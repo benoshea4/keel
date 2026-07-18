@@ -767,3 +767,38 @@ pub async fn usage_partial(
         .collect();
     render(UsageTable { totals, rows })
 }
+
+// --- Micro-cloud phase 6: apps ------------------------------------------------------
+
+struct AppRow {
+    name: String,
+    backend: String,
+    short_backend: String,
+    assets: i64,
+}
+
+#[derive(Template)]
+#[template(path = "apps.html")]
+struct AppsPage {
+    apps: Vec<AppRow>,
+    authed: bool,
+}
+
+/// GET /apps — hosted apps: create, upload bundles, open.
+pub async fn apps_page(State(shared): State<Arc<EngineShared>>) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let apps = db::list_apps(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|(name, backend, assets, _created)| AppRow {
+            name,
+            short_backend: backend.as_deref().map(short).unwrap_or_default(),
+            backend: backend.unwrap_or_default(),
+            assets,
+        })
+        .collect();
+    render(AppsPage {
+        apps,
+        authed: shared.api_token.is_some(),
+    })
+}

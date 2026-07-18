@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — apps</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Apps</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a><a href="/routes">Routes</a><a href="/playground">Playground</a><a href="/apps">Apps</a><a href="/usage">Usage</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  <h2>Create app</h2>
+  {# JSON endpoint driven by a tiny htmx form: hx-vals packages the two
+     fields; an empty backend hash makes a static-only app. #}
+  <form hx-post="/api/apps" hx-ext="json-enc-lite" hx-swap="none"
+        onsubmit="setTimeout(() => location.reload(), 400)">
+    <label for="app-name">Name ([a-z0-9-], up to 32)</label>
+    <input id="app-name" name="name" placeholder="hello" required>
+    <label for="app-backend">Backend module hash (blank = static-only)</label>
+    <input id="app-backend" name="backend_hash" placeholder="sha256 hex">
+    <button type="submit">Create app</button>
+  </form>
+  <script>
+    /* json-enc-lite: htmx posts urlencoded by default; /api/apps wants JSON.
+       Three lines beat a vendored extension. */
+    document.body.addEventListener('htmx:configRequest', (e) => {
+      if (e.detail.path === '/api/apps') {
+        const p = e.detail.parameters;
+        if (!p.backend_hash) delete p.backend_hash;
+        e.detail.headers['Content-Type'] = 'application/json';
+        e.detail.body = JSON.stringify(p);
+      }
+    });
+  </script>
+
+  <h2>Hosted apps</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Backend</th><th>Assets</th><th>Upload bundle</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% if apps.is_empty() %}
+      <tr><td colspan="5">No apps yet — create one above, then upload its dist/ as a zip.</td></tr>
+      {% endif %}
+      {% for a in apps %}
+      <tr>
+        <td><code>{{ a.name }}</code></td>
+        <td>{% if a.backend.is_empty() %}static only{% else %}<code title="{{ a.backend }}">{{ a.short_backend }}</code>{% endif %}</td>
+        <td>{{ a.assets }}</td>
+        <td>
+          <form action="/api/apps/{{ a.name }}/assets" method="post" enctype="text/plain"
+                onsubmit="return keelUploadZip(event, '{{ a.name }}')">
+            <input type="file" id="zip-{{ a.name }}" accept=".zip" required>
+            <button type="submit">Upload zip</button>
+          </form>
+        </td>
+        <td><a href="/apps/{{ a.name }}/">Open app</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <script>
+    /* Raw-bytes upload: the assets endpoint takes the zip as the body, not
+       multipart — fetch does that; forms can't. */
+    function keelUploadZip(e, name) {
+      e.preventDefault();
+      const f = document.getElementById('zip-' + name).files[0];
+      if (!f) return false;
+      fetch('/api/apps/' + name + '/assets', { method: 'POST', body: f })
+        .then(r => r.json().then(j => {
+          alert(r.ok ? ('stored ' + j.stored + ' assets') : ('upload failed: ' + JSON.stringify(j)));
+          location.reload();
+        }))
+        .catch(err => alert('upload failed: ' + err));
+      return false;
+    }
+  </script>
+</body>
+</html>

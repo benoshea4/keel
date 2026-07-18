@@ -195,3 +195,127 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
         )
     })
 }
+
+// --- Micro-cloud phase 6: app serving (the other public data plane) ---------
+
+/// Backend quotas for app api/* calls — the routes-table defaults (ext spec
+/// Task 6.1: "default limits constants").
+const APP_QUOTA: Quota = Quota {
+    fuel: 500_000_000,
+    mem: 64 * 1024 * 1024,
+    time_ms: 5000,
+};
+
+fn asset_response(content_type: &str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            // Dev platform: no cache-invalidation puzzles, ever.
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// ANY /apps/{*full} — serve a hosted app (ext spec Task 6.1):
+///   1. ""            → index.html
+///   2. exact asset   → stored bytes + stored content type
+///   3. api/*         → the backend function (same dispatch core as /fn/*)
+///   4. no extension  → index.html (SPA fallback)   else 404
+pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) -> Response {
+    let raw = match extract_raw(req).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let res = tokio::task::spawn_blocking(move || {
+        // raw.path = "/apps/<name>[/<rest>]" — parse manually (one wildcard
+        // route handles bare, trailing-slash and deep paths identically).
+        let after = raw.path.strip_prefix("/apps/").unwrap_or("");
+        let (name, rest) = match after.split_once('/') {
+            Some((n, r)) => (n.to_string(), r.to_string()),
+            None => (after.to_string(), String::new()),
+        };
+        let conn = match db::open_conn(&shared.db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error": format!("{e:#}")}),
+                )
+            }
+        };
+        let backend = match db::get_app(&conn, &name) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return json_err(StatusCode::NOT_FOUND, json!({"error": format!("no app '{name}'")}))
+            }
+            Err(e) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error": format!("{e:#}")}),
+                )
+            }
+        };
+        let serve_asset = |conn: &keel_core::rusqlite::Connection, path: &str| {
+            match db::get_asset(conn, &name, path) {
+                Ok(Some((ct, bytes))) => Some(asset_response(&ct, bytes)),
+                Ok(None) => None,
+                Err(e) => Some(json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error": format!("{e:#}")}),
+                )),
+            }
+        };
+        // 1. the app root
+        if rest.is_empty() {
+            return serve_asset(&conn, "index.html").unwrap_or_else(|| {
+                json_err(
+                    StatusCode::NOT_FOUND,
+                    json!({"error": "no index.html uploaded for this app"}),
+                )
+            });
+        }
+        // 2. exact asset
+        if let Some(resp) = serve_asset(&conn, &rest) {
+            return resp;
+        }
+        // 3. the backend function
+        if rest == "api" || rest.starts_with("api/") {
+            let Some(hash) = backend else {
+                return json_err(
+                    StatusCode::NOT_FOUND,
+                    json!({"error": format!("app '{name}' has no backend function")}),
+                );
+            };
+            let guest_path = {
+                let p = rest.strip_prefix("api").unwrap_or("");
+                if p.is_empty() {
+                    "/".to_string()
+                } else {
+                    p.to_string()
+                }
+            };
+            drop(conn); // run_function opens its own (one per invocation, §E1)
+            return run_function(&shared, "app", &name, &hash, APP_QUOTA, raw, guest_path);
+        }
+        // 4. SPA fallback for extensionless paths (client-side routing)
+        let last_seg = rest.rsplit('/').next().unwrap_or("");
+        if !last_seg.contains('.') {
+            return serve_asset(&conn, "index.html").unwrap_or_else(|| {
+                json_err(
+                    StatusCode::NOT_FOUND,
+                    json!({"error": "no index.html uploaded for this app"}),
+                )
+            });
+        }
+        json_err(StatusCode::NOT_FOUND, json!({"error": format!("no asset '{rest}'")}))
+    })
+    .await;
+    res.unwrap_or_else(|e| {
+        json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": format!("app task panicked: {e}")}),
+        )
+    })
+}

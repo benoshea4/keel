@@ -5,4 +5,4 @@ resolver = "2"
 # workspace members, because they target wasm32-unknown-unknown. Keep them OUT
 # of [members]. `exclude` is required on top of that: without it, cargo refuses
 # to build the nested packages ("package is not a member of the workspace").
-exclude = ["guests", "providers"]
+exclude = ["guests", "providers", "apps"]
