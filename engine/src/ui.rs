@@ -569,3 +569,201 @@ pub async fn logout() -> axum::response::Response {
     )
         .into_response()
 }
+
+// --- Micro-cloud phase 5: playground + usage ---------------------------------------
+
+struct ProblemListRow {
+    slug: String,
+    title: String,
+}
+
+#[derive(Template)]
+#[template(path = "playground.html")]
+struct PlaygroundPage {
+    problems: Vec<ProblemListRow>,
+    authed: bool,
+}
+
+#[derive(Template)]
+#[template(path = "problem.html")]
+struct ProblemPage {
+    slug: String,
+    title: String,
+    statement: String,
+    authed: bool,
+}
+
+struct SubRow {
+    short_id: String,
+    verdict: String,
+    badge: &'static str,
+    fuel: String,
+    peak_mem: String,
+    ms: String,
+    age: String,
+}
+
+#[derive(Template)]
+#[template(path = "_submissions_table.html")]
+struct SubsTable {
+    subs: Vec<SubRow>,
+}
+
+#[derive(Template)]
+#[template(path = "usage.html")]
+struct UsagePage {
+    authed: bool,
+}
+
+struct TotalRow {
+    short_hash: String,
+    hash: String,
+    count: i64,
+    fuel: i64,
+}
+
+struct UsageRow {
+    age: String,
+    kind: String,
+    refname: String,
+    short_hash: String,
+    hash: String,
+    outcome: String,
+    badge: &'static str,
+    fuel: String,
+    peak_mem: String,
+    ms: i64,
+}
+
+#[derive(Template)]
+#[template(path = "_usage_table.html")]
+struct UsageTable {
+    totals: Vec<TotalRow>,
+    rows: Vec<UsageRow>,
+}
+
+/// Verdict/outcome → one of the FIVE existing badge classes (style.css:
+/// "resist additions"). AC/ok green, WA amber, TLE blue, MLE purple,
+/// RE/OOF/trap red; an in-flight submission shows amber "judging…".
+fn verdict_badge(v: &str) -> &'static str {
+    match v {
+        "AC" | "ok" => "completed",
+        "WA" | "judging…" | "guest_error" => "running",
+        "TLE" | "tle" => "sleeping",
+        "MLE" | "mle" => "waiting_event",
+        _ => "failed", // RE, OOF, oof, trap
+    }
+}
+
+/// GET /playground — seeded problems.
+pub async fn playground_page(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let problems = db::list_problems(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|(slug, title)| ProblemListRow { slug, title })
+        .collect();
+    render(PlaygroundPage {
+        problems,
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// GET /playground/{slug} — statement + submit form + polled submissions.
+pub async fn problem_page(
+    State(shared): State<Arc<EngineShared>>,
+    Path(slug): Path<String>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let (title, statement) = db::get_problem(&conn, &slug)
+        .map_err(internal)?
+        .ok_or((axum::http::StatusCode::NOT_FOUND, "unknown problem".to_string()))?;
+    render(ProblemPage {
+        slug,
+        title,
+        statement,
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// GET /partials/playground/{slug} — the polled submissions <tbody>. Fuel and
+/// peak-mem are rolled up from the per-case detail (sum fuel, max peak).
+pub async fn submissions_partial(
+    State(shared): State<Arc<EngineShared>>,
+    Path(slug): Path<String>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let subs = db::list_submissions(&conn, &slug)
+        .map_err(internal)?
+        .into_iter()
+        .map(|s| {
+            let (fuel, peak, ms) = s
+                .detail
+                .as_deref()
+                .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+                .and_then(|v| {
+                    let arr = v.as_array()?.clone();
+                    let fuel: i64 = arr.iter().filter_map(|c| c["fuel"].as_i64()).sum();
+                    let peak: i64 = arr.iter().filter_map(|c| c["peak_mem"].as_i64()).max()?;
+                    let ms: i64 = arr.iter().filter_map(|c| c["ms"].as_i64()).sum();
+                    Some((fuel, peak, ms))
+                })
+                .map(|(f, p, m)| (f.to_string(), p.to_string(), m.to_string()))
+                .unwrap_or_else(|| ("—".into(), "—".into(), "—".into()));
+            let verdict = s.verdict.unwrap_or_else(|| "judging…".to_string());
+            SubRow {
+                short_id: short(&s.id),
+                badge: verdict_badge(&verdict),
+                verdict,
+                fuel,
+                peak_mem: peak,
+                ms,
+                age: ago(s.created_at),
+            }
+        })
+        .collect();
+    render(SubsTable { subs })
+}
+
+/// GET /usage — page shell; the table polls.
+pub async fn usage_page(State(shared): State<Arc<EngineShared>>) -> Result<Html<String>, UiErr> {
+    render(UsagePage {
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// GET /partials/usage — totals by module + the newest 100 ledger rows.
+pub async fn usage_partial(
+    State(shared): State<Arc<EngineShared>>,
+) -> Result<Html<String>, UiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let totals = db::usage_totals(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|(hash, count, fuel)| TotalRow {
+            short_hash: short(&hash),
+            hash,
+            count,
+            fuel,
+        })
+        .collect();
+    let rows = db::recent_invocations(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|r| UsageRow {
+            age: ago(r.created_at),
+            kind: r.kind,
+            refname: r.refname,
+            short_hash: short(&r.module_hash),
+            hash: r.module_hash,
+            badge: verdict_badge(&r.outcome),
+            outcome: r.outcome,
+            fuel: r.fuel_used.map(|f| f.to_string()).unwrap_or_else(|| "—".into()),
+            peak_mem: r.peak_mem.map(|p| p.to_string()).unwrap_or_else(|| "—".into()),
+            ms: r.duration_ms,
+        })
+        .collect();
+    render(UsageTable { totals, rows })
+}

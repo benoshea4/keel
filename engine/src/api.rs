@@ -894,3 +894,131 @@ pub async fn delete_route(
         Err((StatusCode::NOT_FOUND, "no such route".to_string()))
     }
 }
+
+// --- Micro-cloud phase 5: the playground judge (control plane) --------------
+
+/// POST /api/problems — operator seeding, idempotent upsert:
+/// `{"slug","title","statement","cases":[{"input","expected"},...]}`.
+pub async fn upsert_problem(
+    State(shared): State<Arc<EngineShared>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiErr> {
+    let slug = body
+        .get("slug")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("missing field: slug"))?;
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err(bad("slug must be non-empty [a-z0-9-]"));
+    }
+    let title = body
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("missing field: title"))?;
+    let statement = body
+        .get("statement")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("missing field: statement"))?;
+    let cases: Vec<(String, String)> = body
+        .get("cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("missing field: cases (array)"))?
+        .iter()
+        .map(|c| {
+            Some((
+                c.get("input")?.as_str()?.to_string(),
+                c.get("expected")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(|| bad("each case needs string fields input + expected"))?;
+    if cases.is_empty() {
+        return Err(bad("a problem needs at least one case"));
+    }
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    db::upsert_problem(&conn, slug, title, statement, &cases).map_err(internal)?;
+    Ok(Json(json!({"slug": slug, "cases": cases.len()})))
+}
+
+/// POST /api/submissions — two body shapes, like module upload:
+///   * JSON `{"problem": slug, "module_hash": hash}` (scripts);
+///   * multipart `problem` + `file` (the playground page — stores the module
+///     through the same content-addressed flow first).
+///
+/// Returns 202 `{"id"}` immediately; judging runs on a blocking thread and
+/// lands the verdict in ONE UPDATE (poll GET /api/submissions/{id}).
+pub async fn create_submission(
+    State(shared): State<Arc<EngineShared>>,
+    req: Request,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let (problem, hash) = if content_type(&req).starts_with("multipart/form-data") {
+        let mut mp = Multipart::from_request(req, &()).await.map_err(bad)?;
+        let (mut problem, mut file) = (None, None);
+        while let Some(field) = mp.next_field().await.map_err(bad)? {
+            match field.name() {
+                Some("problem") => problem = Some(field.text().await.map_err(bad)?),
+                Some("file") => file = Some(field.bytes().await.map_err(bad)?),
+                _ => {}
+            }
+        }
+        let problem = problem.ok_or_else(|| bad("missing field: problem"))?;
+        let file = file.ok_or_else(|| bad("missing field: file"))?;
+        if !file.starts_with(b"\0asm") {
+            return Err(bad("not a WebAssembly binary (missing \\0asm magic)"));
+        }
+        let hash = hex::encode(Sha256::digest(&file));
+        let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+        db::insert_module(&conn, &hash, &format!("solver-{problem}"), &file).map_err(internal)?;
+        (problem, hash)
+    } else {
+        let Json(body) = Json::<Value>::from_request(req, &()).await.map_err(bad)?;
+        (
+            body.get("problem")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad("missing field: problem"))?
+                .to_string(),
+            body.get("module_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad("missing field: module_hash"))?
+                .to_string(),
+        )
+    };
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::get_problem(&conn, &problem).map_err(internal)?.is_none() {
+        return Err(bad(format!("unknown problem '{problem}'")));
+    }
+    if !db::module_exists(&conn, &hash).map_err(internal)? {
+        return Err(bad(format!("unknown module hash {hash}")));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    db::insert_submission(&conn, &id, &problem, &hash).map_err(internal)?;
+    drop(conn); // the judge thread opens its own (§E1)
+    let judge_shared = shared.clone();
+    let judge_id = id.clone();
+    // NOT inline in the handler (ext spec Task 5.2): 202 now, verdict later.
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = keel_core::judge::judge_submission(&judge_shared, &judge_id) {
+            tracing::error!("judging {judge_id} failed (verdict stays NULL): {e:#}");
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({"id": id}))))
+}
+
+/// GET /api/submissions/{id} — verdict is null while judging; `detail` is the
+/// stored per-case JSON array (a string, like workflow output).
+pub async fn get_submission(
+    State(shared): State<Arc<EngineShared>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let s = db::get_submission(&conn, &id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "unknown submission id".to_string()))?;
+    Ok(Json(json!({
+        "id": s.id,
+        "problem": s.problem,
+        "module_hash": s.module_hash,
+        "verdict": s.verdict,
+        "detail": s.detail,
+        "created_at": s.created_at,
+    })))
+}

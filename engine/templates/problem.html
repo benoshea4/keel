@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — {{ slug }}</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>{{ title }}</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a><a href="/routes">Routes</a><a href="/playground">Playground</a><a href="/apps">Apps</a><a href="/usage">Usage</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  {# Statement is operator-seeded markdown rendered as <pre> — no md dep
+     (ext spec §E3). Askama escapes it; untrusted it is not, but why risk it. #}
+  <pre>{{ statement }}</pre>
+
+  <h2>Submit a solver</h2>
+  {# world `solver`: export solve(input) -> result<string,string>, ZERO
+     imports. Build with cargo component; upload the .wasm here. #}
+  <form action="/api/submissions" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="problem" value="{{ slug }}">
+    <label for="file">Solver component (.wasm, world "solver")</label>
+    <input id="file" name="file" type="file" required>
+    <button type="submit" onclick="setTimeout(() => location.reload(), 400)">Submit</button>
+  </form>
+
+  <h2>Submissions</h2>
+  <table>
+    <thead>
+      <tr><th>Submission</th><th>Verdict</th><th>Fuel</th><th>Peak mem</th><th>Wall ms</th><th>Age</th></tr>
+    </thead>
+    <tbody hx-get="/partials/playground/{{ slug }}" hx-trigger="load, every 2s" hx-swap="innerHTML">
+    </tbody>
+  </table>
+  {# The metering columns are the point: an untrusted-code platform that
+     shows you exactly what each submission cost (ext spec Task 5.3). #}
+</body>
+</html>

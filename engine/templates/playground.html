@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — playground</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Playground</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a><a href="/routes">Routes</a><a href="/playground">Playground</a><a href="/apps">Apps</a><a href="/usage">Usage</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  <h2>Problems</h2>
+  {# Seed problems via POST /api/problems (docs/api.md) — this page lists and
+     links; the judge lives on each problem page. #}
+  <table>
+    <thead><tr><th>Problem</th><th>Title</th></tr></thead>
+    <tbody>
+      {% if problems.is_empty() %}
+      <tr><td colspan="2">No problems seeded — POST /api/problems with a slug, statement and cases.</td></tr>
+      {% endif %}
+      {% for p in problems %}
+      <tr>
+        <td><a href="/playground/{{ p.slug }}"><code>{{ p.slug }}</code></a></td>
+        <td>{{ p.title }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

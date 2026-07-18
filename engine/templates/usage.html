@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — usage</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Usage</h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a><a href="/routes">Routes</a><a href="/playground">Playground</a><a href="/apps">Apps</a><a href="/usage">Usage</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  {# The ledger: every function/solver invocation, successes AND failures —
+     metering that only counts successes is fiction (ext spec Task 4.3). #}
+  <div hx-get="/partials/usage" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
+</body>
+</html>

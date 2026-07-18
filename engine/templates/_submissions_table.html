@@ -1,0 +1,17 @@
+{# Swapped into the problem page's submissions <tbody> every 2s. Verdict
+   badges reuse the five existing status classes — no palette additions:
+   AC=completed(green) WA=running(amber) TLE=sleeping(blue)
+   MLE=waiting_event(purple) RE/OOF=failed(red). #}
+{% if subs.is_empty() %}
+<tr><td colspan="6">No submissions yet.</td></tr>
+{% endif %}
+{% for s in subs %}
+<tr>
+  <td><code>{{ s.short_id }}</code></td>
+  <td><span class="badge {{ s.badge }}">{{ s.verdict }}</span></td>
+  <td>{{ s.fuel }}</td>
+  <td>{{ s.peak_mem }}</td>
+  <td>{{ s.ms }}</td>
+  <td>{{ s.age }}</td>
+</tr>
+{% endfor %}

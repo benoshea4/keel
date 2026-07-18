@@ -401,6 +401,13 @@ async fn serve(
             "/api/routes/{*prefix}",
             axum::routing::delete(api::delete_route),
         )
+        // Micro-cloud phase 5 — the playground judge (control plane).
+        .route("/api/problems", post(api::upsert_problem))
+        .route(
+            "/api/submissions",
+            post(api::create_submission).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route("/api/submissions/{id}", get(api::get_submission))
         .route(
             "/api/workflows",
             post(api::create_workflow).get(api::list_workflows),
@@ -433,6 +440,12 @@ async fn serve(
         .route("/providers", get(ui::providers_page))
         // Micro-cloud phase 4 — routes UI (Playground/Apps/Usage land in 5/6).
         .route("/routes", get(ui::routes_page))
+        // Micro-cloud phase 5 — playground + usage UI.
+        .route("/playground", get(ui::playground_page))
+        .route("/playground/{slug}", get(ui::problem_page))
+        .route("/partials/playground/{slug}", get(ui::submissions_partial))
+        .route("/usage", get(ui::usage_page))
+        .route("/partials/usage", get(ui::usage_partial))
         .route("/partials/schedules", get(ui::schedules_partial))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))
