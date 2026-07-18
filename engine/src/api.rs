@@ -1073,7 +1073,11 @@ pub async fn upload_assets(
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body.to_vec()))
         .map_err(|e| bad(format!("not a readable zip: {e}")))?;
     // Validate EVERY entry before storing ANY — a bundle with one slip entry
-    // stores nothing (all-or-nothing beats half-a-deploy).
+    // stores nothing (all-or-nothing beats half-a-deploy). The decompressed
+    // total is capped: a 64 MiB upload that inflates past 256 MiB is a zip
+    // bomb, not a frontend.
+    const MAX_UNPACKED: u64 = 256 * 1024 * 1024;
+    let mut unpacked: u64 = 0;
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for i in 0..zip.len() {
         let mut entry = zip
@@ -1088,9 +1092,24 @@ pub async fn upload_assets(
                 "zip entry '{raw}' escapes the bundle (zip-slip) — rejected"
             )));
         }
+        unpacked = unpacked.saturating_add(entry.size());
+        if unpacked > MAX_UNPACKED {
+            return Err(bad(
+                "bundle decompresses past 256 MiB — zip bomb or wrong artifact",
+            ));
+        }
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut bytes)
             .map_err(|e| bad(format!("reading zip entry '{raw}': {e}")))?;
+        // entry.size() is the HEADER's claim; trust the actual bytes too.
+        if bytes.len() as u64 > entry.size() && {
+            unpacked = unpacked.saturating_add(bytes.len() as u64 - entry.size());
+            unpacked > MAX_UNPACKED
+        } {
+            return Err(bad(
+                "bundle decompresses past 256 MiB — zip bomb or wrong artifact",
+            ));
+        }
         entries.push((raw, bytes));
     }
     let stored = entries.len();

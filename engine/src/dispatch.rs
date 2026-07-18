@@ -230,11 +230,20 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
     };
     let res = tokio::task::spawn_blocking(move || {
         // raw.path = "/apps/<name>[/<rest>]" — parse manually (one wildcard
-        // route handles bare, trailing-slash and deep paths identically).
+        // route handles trailing-slash and deep paths identically).
         let after = raw.path.strip_prefix("/apps/").unwrap_or("");
         let (name, rest) = match after.split_once('/') {
             Some((n, r)) => (n.to_string(), r.to_string()),
-            None => (after.to_string(), String::new()),
+            None => {
+                // Bare /apps/<name>: serving index.html HERE would break its
+                // relative asset URLs (the browser resolves ./x.js against
+                // /apps/, not /apps/<name>/). Redirect like a filesystem.
+                return (
+                    StatusCode::MOVED_PERMANENTLY,
+                    [(axum::http::header::LOCATION, format!("{}/", raw.path))],
+                )
+                    .into_response();
+            }
         };
         let conn = match db::open_conn(&shared.db_path) {
             Ok(c) => c,

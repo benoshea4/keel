@@ -37,10 +37,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-component
+      - name: Install cargo-component + trunk
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-component@0.21.1
+          tool: cargo-component@0.21.1,trunk@0.21.14
       - name: Phase 1 acceptance (journal replay + crash recovery)
         run: ./scripts/accept_phase1.sh
       - name: Phase 2 acceptance (durable timers + events + UI)
@@ -73,6 +73,8 @@ jobs:
         run: ./scripts/accept_phase4.sh
       - name: Micro-cloud phase 5 — judge + metering + runaway watchdog (v2.8)
         run: ./scripts/accept_phase5.sh
+      - name: Micro-cloud phase 6 — hosted apps, the flagship slice (v3.0)
+        run: ./scripts/accept_phase6.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

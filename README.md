@@ -12,12 +12,21 @@ fleet tenancy) · [HTTP API](docs/api.md) · [writing guests](docs/guests.md) ·
 [capability providers](PROVIDERS.md) (pure sandboxes, or — since v2.5 —
 effectful connectors whose every wire call is journaled individually).
 
-Since v2.7 Keel is growing into a **single-binary micro-cloud**
-([SPEC-MICROCLOUD.md](SPEC-MICROCLOUD.md)): stateless serverless functions
-bound to `/fn/<name>` prefixes — fresh sandboxed instance per request,
-fuel/memory/time quotas, a usage ledger for every invocation — that can start
-and query durable workflows through the same process. Lambda + Step
-Functions, one binary, one SQLite file.
+Since v3.0 Keel is a **single-binary micro-cloud**
+([SPEC-MICROCLOUD.md](SPEC-MICROCLOUD.md)):
+
+- **Functions** (v2.7) — stateless serverless components on `/fn/<name>`
+  prefixes: fresh sandboxed instance per request, fuel/memory/time quotas, a
+  usage-ledger row for every invocation, and a `platform-api` bridge to start
+  and query durable workflows. Lambda + Step Functions in one process.
+- **Judge + metering** (v2.8) — a LeetCode-style playground for import-free
+  `solver` components (AC·WA·TLE·MLE·OOF·RE, per-case fuel/memory/time
+  quotas) and a `/usage` page over the ledger. Runaway workflows die on their
+  own fuel budget.
+- **Hosted apps** (v3.0) — upload a zip: a Rust→WASM frontend served from
+  SQLite plus a backend function. Browser-served WASM UI → function → durable
+  workflow → result, one binary, one file. Open `/apps/hello/`, click "Start
+  job", kill the engine mid-run, restart — the workflow finishes anyway.
 
 **Embeddable, literally** (since v2.2 the engine is a library, `keel-core`,
 and the server is one consumer of it):

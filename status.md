@@ -47,6 +47,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/smoke_provider_registry.sh                # must print PROVIDER REGISTRY SMOKE PASS (v2.6)
 ./scripts/accept_phase4.sh                          # must print PHASE 4 PASS (micro-cloud functions, v2.7)
 ./scripts/accept_phase5.sh                          # must print PHASE 5 PASS (judge + metering + watchdog, v2.8)
+./scripts/accept_phase6.sh                          # must print PHASE 6 PASS (hosted apps, v3.0; needs trunk)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -592,12 +593,41 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - [x] 5.4 /usage page
    - [x] 5.5 solver guests
    - [x] 5.6 accept_phase5.sh ×2 + FULL suite + angry review + ship v2.8
-   - [ ] 6.1 apps/assets tables + zip upload (zip-slip reject) + serving fallback
-   - [ ] 6.2 apps/hello (Leptos+Trunk)
-   - [ ] 6.3 /apps UI
+   - [x] 6.1 apps/assets tables + zip upload (zip-slip reject) + serving fallback
+   - [x] 6.2 apps/hello (Leptos+Trunk)
+   - [x] 6.3 /apps UI
    - [ ] 6.4 accept_phase6.sh ×2 + FULL suite + angry review + ship v3.0
-   - NEXT: Task 6.1 (apps/assets tables + zip upload + serving fallback);
-     install trunk first (`cargo install --locked trunk`), then 6.2 hello app.
+   - NEXT: 6.4 finale — full 18-gate suite, push, CI, tag v3.0 + release.
+     After that the MICRO-CLOUD EXTENSION IS COMPLETE; further work is
+     demand-driven only (ROADMAP Next: host-kv, replication, stretch items).
+
+   PHASE 6 RECORD (v3.0, 2026-07-18):
+   - **Serving (6.1)**: one wildcard route (/apps/{*full}), name parsed
+     manually; order = index.html → exact asset → api/* backend (same
+     dispatch core as /fn/*, kind 'app', routes-table default quotas) → SPA
+     fallback for extensionless paths. Assets live in SQLite with stored
+     content types (.wasm/.js FORCED — mime_guess is trusted for the rest),
+     cache-control: no-store. There is NO filesystem serving, so zip-slip is
+     purely an upload-time concern.
+   - **Upload (6.1)**: all-or-nothing — every entry validated before any row
+     lands. Angry review added two real fixes: (a) zip-BOMB cap (a 305KB zip
+     decompressing to 300MB → 400; 256 MiB decompressed ceiling, header
+     claim AND actual bytes both counted); (b) bare /apps/<name> 301→…/
+     (serving index.html at the bare path would break its relative ./x.js
+     URLs — the browser resolves them against /apps/).
+   - **hello app (6.2)**: Leptos 0.7 CSR + Trunk 0.21.14 (installed via
+     cargo install --locked trunk; CI gets it from taiki-e/install-action).
+     leptos 0.7 API held (signal()/mount_to_body/spawn_local) — the spec's
+     fallback ladder was not needed. gloo-timers (futures) added for the 1s
+     poll (the spec's dep list implies it; no other wasm sleep exists).
+     MODULE_HASH is sed-injected by the gate and RESTORED via trap (repo
+     stays clean even on failure).
+   - **Environment**: trunk 0.21.14 now installed on this machine.
+   - **Gate**: PHASE 6 PASS ×2 from clean (stored>=3, root serves <script +
+     .wasm, application/wasm content type + >100KB asset, THE VERTICAL SLICE
+     via the app's own endpoints — start through the backend, poll through
+     the backend, count:3 — zip-slip 400 with zero rows). Human check
+     printed, not automated. Full 18-script suite green after (see below).
 
    PHASE 5 RECORD (v2.8, 2026-07-18):
    - **Judge (5.2)**: judge.rs = bindgen #4 (world solver, EMPTY linker — the

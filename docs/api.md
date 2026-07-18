@@ -22,6 +22,9 @@ urlencoded/multipart body shape.
 | `POST /api/problems` *(phase 5)* | Idempotent operator seeding: `{"slug","title","statement","cases":[{"input","expected"},…]}` — the case list is replaced atomically. |
 | `POST /api/submissions` | Judge a solver against a problem. JSON `{"problem","module_hash"}`, or multipart `problem`+`file` (stores the module first). → 202 `{"id"}`; judging runs off-thread. Per-case quotas: 10⁹ fuel, 256 MiB, 2000 ms. Verdicts: AC · WA · TLE · MLE · OOF · RE; stops at first non-AC; each case writes a `solve` ledger row. |
 | `GET /api/submissions/{id}` | `{"verdict"}` is null while judging; `detail` = per-case JSON (verdict, fuel, peak_mem, ms). |
+| `POST /api/apps` *(phase 6)* | `{"name","backend_hash"?}` → 201. Name `[a-z0-9-]{1,32}`; no backend = static-only; re-POST re-binds. |
+| `POST /api/apps/{name}/assets` | Body = a zip of the app's `dist/` (64 MiB cap). All-or-nothing: zip-slip entries (`..`, absolute) → 400 with nothing stored; decompressed total capped at 256 MiB (zip bombs → 400). `.wasm`/`.js` content types forced. → `{"stored": N}`. |
+| `ANY /apps/{name}/*` *(PUBLIC — no token)* | App serving: `/` → index.html · exact asset (stored content type, `cache-control: no-store`) · `api/*` → the backend function (guest sees the path after `api`) · extensionless → index.html (SPA fallback) · else 404. Bare `/apps/{name}` 301-redirects to `…/` so relative asset URLs resolve. |
 
 ## Workflows
 
