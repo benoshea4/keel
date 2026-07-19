@@ -813,6 +813,113 @@ O. **Amendment 1 — operating the public plane + the CLI (v3.1/v3.2, started
      (chunks, idle machine); 42 unit tests (5 new: retrofit, window count,
      tail/after/trim, gc_ledger, truncate boundaries); clippy -D clean.
 
+P. **The v3.2 audit + forward plan (2026-07-19).** Written on user request
+   ("make a plan… angry reviewer for fixes, happy founder for ideas") after
+   Amendment 1 shipped. Two voices, verified against the code — every fix
+   below was CONFIRMED by reading it, not vibes. Nothing here is started;
+   the user picks. (Verified-clean along the way: login cookie is already
+   SameSite=Lax + digest-only — CSRF posture fine; zip caps, admission
+   exactness, and journal invariants all hold.)
+
+   ANGRY REVIEWER — THE FIX LIST (severity-ordered):
+   - [ ] P-FIX-1 (P0, info disclosure): PUBLIC-plane errors leak internals.
+     dispatch.rs answers /fn/* and /apps/* engine faults with
+     `{"error": format!("{e:#}")}` — full anyhow chains: module hashes, db
+     paths, wasmtime compile errors, all to tokenless callers. Remedy:
+     public plane gets a generic `{"error":"internal error"}` + a
+     tracing::error with the chain; CONTROL plane keeps verbatim errors
+     (operators are authed). Gate: probe asserts no hash/path in a
+     provoked public 500.
+   - [ ] P-FIX-2 (P0, availability): NO global cap on concurrent function
+     execution. Every /fn and /apps/api request parks one spawn_blocking
+     thread for its whole run (up to time_limit_ms); the judge ALSO
+     spawn_blockings per submission, uncapped, into the same default
+     ~512-thread tokio pool. A flood of slow requests exhausts the pool —
+     rate limits are per-ref and don't compose into a global bound.
+     Remedy: `--max-fn-concurrent` (semaphore; over it → fast 503
+     "at capacity" — honest backpressure beats queueing forever) + a judge
+     concurrency of 1 with a bounded queue. Gate: flood a slow fixture,
+     assert 503s + engine stays healthy + workflows unaffected.
+   - [ ] P-FIX-3 (P1, perf): every /fn request reads the FULL module BLOB
+     from SQLite before checking the compiled cache — invoke_handler does
+     get_module_wasm() then shared.component(hash, &wasm), which ignores
+     the bytes on a hit. MB-scale copy per request for nothing. Remedy:
+     component_cached(hash) fast path first; read bytes only on miss.
+   - [ ] P-FIX-4 (P1, memory): the compiled-component cache is UNBOUNDED
+     (components: Mutex<HashMap>) — 500 uploaded modules = 500 JIT images
+     held forever; first-compile also happens UNDER the cache lock
+     (documented as accepted; re-evaluate with the cap). Remedy: small LRU
+     (--max-compiled-modules, default ~64) — wasmtime Components are
+     Arc-backed so eviction is safe while instances run.
+   - [ ] P-FIX-5 (P1, robustness): no read/response timeout on the data
+     plane — a slow-drip 10 MiB body holds a connection + async task
+     indefinitely (extract_raw's to_bytes has no deadline). Remedy: a
+     timeout layer (~30s) on /fn + /apps routes only (control plane and UI
+     polls untouched). Gate-able with a throttled upload.
+   - [ ] P-FIX-6 (P2, asset perf, founder crossover): cache-control:
+     no-store on EVERY asset forces re-downloading ~MB wasm on each app
+     load. Trunk emits content-hashed filenames — those are immutable.
+     Remedy: store sha256 per asset at upload; ETag + If-None-Match → 304
+     everywhere, long max-age for hash-named files, keep no-store for
+     index.html. Apps go from ~1 MB/load to ~1 KB.
+   - [ ] P-FIX-7 (P2, CLI symmetry): the CLI can create but not inspect or
+     undo — no `keel ls` (overview), `keel unbind <prefix>`,
+     `keel apps rm`? (delete app needs an API route too — apps have no
+     DELETE at all, only routes do!), `keel run --timeout` for scripts.
+     The missing `DELETE /api/apps/{name}` (+ cascade assets) is a real
+     API gap the CLI work would surface anyway.
+   - [ ] P-FIX-8 (P2, polish): /favicon.ico 404s on every page view (log
+     noise, browser retry). Embed a 1-file icon like htmx.min.js.
+   - [ ] P-FIX-9 (P2, tests): admit() itself has no unit test — the
+     inflight+ledger interplay is gate-covered only. Try an in-memory
+     EngineShared (EngineOptions on :memory:); if construction is too
+     heavy, extract the countable core into a testable fn and say so here.
+
+   HAPPY FOUNDER — THE IDEA SHELF (leverage-ranked, each is a spec
+   amendment or ROADMAP row before it is code):
+   - P-IDEA-1 **wasi:http/proxy compatibility world** (SPEC-MICROCLOUD
+     stretch): the dispatcher learns to drive unmodified ecosystem
+     components — Spin apps, componentize-js/JCO output, anything
+     targeting wasi:http. Today only keel-WIT guests run; this one change
+     makes the ENTIRE component ecosystem deployable on a one-binary
+     cloud. The single biggest adoption unlock on the board. (Amendment 2,
+     phase-sized.)
+   - P-IDEA-2 **wasi:keyvalue for functions** (stretch): a kv host
+     interface backed by a table — functions get durable state without
+     reaching for a workflow. Sessions, counters, caches: "real apps"
+     territory. Pairs naturally with IDEA-1 (wasi guests expect it).
+   - P-IDEA-3 **Function secrets/config**: workflows have secret(name);
+     functions have NOTHING — they can't hold an API key, which walls
+     them off from every external service. Per-route config set on the
+     control plane, injected via a platform-api `config-get` (WIT bump)
+     — the last thing between /fn and useful integrations.
+   - P-IDEA-4 **`keel new <name> --template counter|static`**: scaffold
+     apps/hello as a template (frontend + starter-fn + Trunk.toml with the
+     public_url pitfall pre-solved). `keel new` → `trunk build` →
+     `keel deploy` is a five-minute first-app story — DX is the moat for
+     a dev-tools product.
+   - P-IDEA-5 **Cron → functions**: schedules can only start workflows;
+     let a schedule invoke a ROUTE (classic cron-job semantics, ledger
+     rows included). Small, closes a whole use-case class.
+   - P-IDEA-6 **Latency percentiles from the ledger**: duration_ms is
+     already recorded per invocation — expose p50/p95/p99 per ref on
+     /metrics and sparklines on /usage. Pure exposure of existing data;
+     the observability story writes itself.
+   - P-IDEA-7 **Usage export**: day-rolled CSV/JSON of the ledger per
+     ref/module — the metering primitive any future hosted cloud bills
+     from, useful standalone for chargeback today.
+   - P-IDEA-8 **Public read-only playground mode**: problems + verdicts
+     visible tokenless (submissions stay authed) — the judge is the most
+     demo-able thing Keel has; let it demo itself.
+
+   RECOMMENDED SEQUENCE (if the user says go): v3.3 "harden" =
+   P-FIX-1..5 behind one gate (accept_harden.sh) — the two P0s are real
+   and the three P1s are an afternoon each; v3.4 "polish" = P-FIX-6..9 +
+   P-IDEA-6 (ETag + CLI symmetry incl. DELETE /api/apps + favicon +
+   percentiles); then Amendment 2 for IDEA-1/2/3 (spec first, code
+   second — same discipline as Amendment 1). Everything stays
+   demand-driven: nothing above starts without the user's word.
+
 ---
 
 ## What exists (file map, all phases)
