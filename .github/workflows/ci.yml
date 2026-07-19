@@ -77,6 +77,8 @@ jobs:
         run: ./scripts/accept_phase6.sh
       - name: Amendment 1 — rate limits + fn logs + ledger retention (v3.1)
         run: ./scripts/accept_operate.sh
+      - name: Amendment 1 — the client CLI (v3.2)
+        run: ./scripts/accept_cli.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

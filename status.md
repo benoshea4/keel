@@ -731,8 +731,35 @@ O. **Amendment 1 — operating the public plane + the CLI (v3.1/v3.2, started
    - [x] O.6 UI: rate cols on /routes + /apps, /logs page + partial + row links
    - [x] O.7 accept_operate.sh ×2 from clean + angry review + docs + FULL suite
    - [ ] O.8 ship v3.1: push, CI green, tag on CI SHA, release + 6 assets
-   - [ ] O.9 CLI: client.rs (deploy/bind/run/logs) + accept_cli.sh ×2 + angry review
+   - [x] O.9 CLI: client.rs (deploy/bind/run/logs) + accept_cli.sh ×2 + angry review
    - [ ] O.10 ship v3.2 same ritual; update memory + ROADMAP + demo instance
+
+   V3.2 RECORD (2026-07-19):
+   - **client.rs**: Conn (clap-flattened --server/KEEL_SERVER +
+     --token/KEEL_API_TOKEN — the server's own env var, one export = both
+     roles) + one finish() choke point (2xx→JSON, non-2xx→"server said
+     <code>: <body verbatim>" exit 1, transport→"cannot reach the engine").
+     resolve_module: .wasm path uploads (name = file stem), else 64-hex
+     passes through, else a helpful bail. deploy: recursive collect
+     (dot-entries skipped at EVERY level, SYMLINKS SKIPPED — following them
+     invites cycles/infinite recursion, angry-review catch), in-memory
+     ZipWriter (SimpleFileOptions + Deflated), warning when no index.html,
+     re-deploy = upsert end to end (gate-proven). run: watches with status
+     transitions on stderr, output string on stdout, exit 0/1 by terminal
+     state; --detach prints the id. logs: kind inferred from leading '/';
+     --follow polls after=<last id> 1/s with explicit stdout flush.
+   - **No engine-side code paths** (the A4 principle): everything the CLI
+     does, curl can do; api.md says so. ureq parses JSON BY HAND
+     (into_json sits behind a feature flag core doesn't enable — two lines
+     beat feature drift; caught at first compile).
+   - **Gate**: CLI PASS ×2 from clean + once more after the symlink fix —
+     tokened engine; tokenless + wrong-token exit 1; --token AND env token
+     both work; bind → tokenless curl through the public plane; run
+     counter to completed (output + exit code + stderr transitions);
+     deploy of a fabricated dir stores EXACTLY the 3 real files (.DS_Store
+     stays home), css served with the right type, backend roundtrip live,
+     re-deploy replaces index.html; logs for both inferred kinds.
+   - clippy -D clean; CI step added (suite = 20 gates).
 
    V3.1 RECORD (2026-07-19):
    - **Admission (A1)**: core/function.rs admit() → Admission::{Admitted(AdmitGuard),

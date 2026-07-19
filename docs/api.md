@@ -7,6 +7,9 @@ open (loopback use). `/assets/*`, `/login`, `/logout` never require auth.
 Write endpoints marked *(also form)* additionally accept the UI's
 urlencoded/multipart body shape.
 
+The CLI verbs (`keel deploy` / `bind` / `run` / `logs`, Amendment 1 A4) are
+thin clients of exactly these endpoints — anything they do, curl can do.
+
 ## Modules
 
 | Route | What |

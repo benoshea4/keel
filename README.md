@@ -68,7 +68,9 @@ cargo build --release -p keel-engine
 # run
 ./target/release/keel serve --db keel.db --listen 127.0.0.1:8080
 
-# upload the demo guest, start a workflow, watch it
+# upload the demo guest, start a workflow, watch it — one CLI verb (v3.2):
+./target/release/keel run guests/demo/target/wasm32-unknown-unknown/release/demo.wasm
+# ...or the raw API the CLI is a thin client of:
 curl -s -X POST --data-binary @guests/demo/target/wasm32-unknown-unknown/release/demo.wasm \
   'localhost:8080/api/modules?name=demo'                     # -> {"hash":"..."}
 curl -s -X POST localhost:8080/api/workflows \
@@ -76,6 +78,16 @@ curl -s -X POST localhost:8080/api/workflows \
   -d '{"module_hash":"<hash>","input":{}}'                   # -> {"id":"..."}
 curl -s localhost:8080/api/workflows/<id>                    # status/output
 curl -s localhost:8080/api/workflows/<id>/journal            # the journal itself
+```
+
+The micro-cloud has a curl-free front door too (`--server`/`KEEL_SERVER`,
+`--token`/`KEEL_API_TOKEN` — the same variable the server reads):
+
+```bash
+keel bind /fn/echo echo_fn.wasm --rate 600     # upload + bind a function (600 req/min)
+keel deploy dist/ --name hello --backend starter_fn.wasm   # directory -> running app
+keel logs /fn/echo --follow                    # tail what the function logs
+keel run counter.wasm --input '{"target":3}'   # durable workflow, watched to completion
 ```
 
 Prove durability to yourself: start the demo workflow, `kill -9` the engine during its

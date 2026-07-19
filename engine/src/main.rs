@@ -15,6 +15,7 @@
 
 mod api;
 mod auth;
+mod client;
 mod dispatch;
 mod fleet;
 mod ui;
@@ -122,6 +123,79 @@ enum Cmd {
         #[arg(long)]
         config: String,
     },
+    // --- Amendment 1 (A4): client verbs — thin HTTP clients of a RUNNING
+    // --- engine (--server / KEEL_SERVER; --token / KEEL_API_TOKEN).
+    /// Deploy a directory as a hosted app: zip it, upload the backend (if
+    /// given), upsert the app, upload the bundle, print the URL. Re-running
+    /// re-deploys.
+    Deploy {
+        /// The built frontend directory (e.g. dist/). Dot-files are skipped.
+        dir: String,
+        /// App name ([a-z0-9-], up to 32).
+        #[arg(long)]
+        name: String,
+        /// Backend function: a handler-world .wasm file, uploaded first.
+        #[arg(long)]
+        backend: Option<String>,
+        /// Backend rate limit (admitted api/* calls per rolling 60s).
+        #[arg(long)]
+        rate: Option<i64>,
+        #[command(flatten)]
+        conn: client::Conn,
+    },
+    /// Upload a handler-world component and bind it to a /fn/ prefix in one
+    /// step.
+    Bind {
+        /// Route prefix (starts with /fn/, no trailing slash).
+        prefix: String,
+        /// A .wasm file (uploaded first) or an already-uploaded module hash.
+        module: String,
+        /// Fuel limit per request (default 5e8).
+        #[arg(long)]
+        fuel: Option<i64>,
+        /// Memory limit in MiB (default 64).
+        #[arg(long)]
+        mem_mb: Option<i64>,
+        /// Wall-time limit in ms (default 5000).
+        #[arg(long)]
+        time_ms: Option<i64>,
+        /// Rate limit (admitted runs per rolling 60s; omit = unlimited).
+        #[arg(long)]
+        rate: Option<i64>,
+        /// Module name in the registry (default: the file stem).
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        conn: client::Conn,
+    },
+    /// Start a durable workflow and watch it to a terminal state (exit 0 on
+    /// completed, 1 on failed). A .wasm path is uploaded first.
+    Run {
+        /// A workflow-world .wasm file or module hash.
+        module: String,
+        /// Workflow input, as JSON.
+        #[arg(long, default_value = "{}")]
+        input: String,
+        /// Print the workflow id and exit instead of watching.
+        #[arg(long)]
+        detach: bool,
+        #[command(flatten)]
+        conn: client::Conn,
+    },
+    /// Tail captured platform-api log lines for a route or app.
+    Logs {
+        /// Route prefix (/fn/...) or app name — kind is inferred from the
+        /// leading slash; --kind overrides.
+        r#ref: String,
+        /// 'function' or 'app'.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Poll for new lines every second (Ctrl-C to stop).
+        #[arg(long)]
+        follow: bool,
+        #[command(flatten)]
+        conn: client::Conn,
+    },
 }
 
 /// v2.4 — tracing init, shared by serve and fleet. Default build: the plain
@@ -211,6 +285,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Fleet { config } => fleet::run(&config).await,
+        // A4 client verbs: one-shot blocking HTTP against a running engine —
+        // nothing else is scheduled on the runtime, so blocking here is fine.
+        Cmd::Deploy { dir, name, backend, rate, conn } => {
+            client::deploy(&conn, &dir, &name, backend.as_deref(), rate)
+        }
+        Cmd::Bind { prefix, module, fuel, mem_mb, time_ms, rate, name, conn } => {
+            client::bind(&conn, &prefix, &module, fuel, mem_mb, time_ms, rate, name.as_deref())
+        }
+        Cmd::Run { module, input, detach, conn } => client::run(&conn, &module, &input, detach),
+        Cmd::Logs { r#ref, kind, follow, conn } => {
+            client::logs(&conn, &r#ref, kind.as_deref(), follow)
+        }
     }
 }
 

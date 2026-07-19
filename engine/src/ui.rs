@@ -96,8 +96,8 @@ fn short(s: &str) -> String {
 
 /// Percent-encode a query-string VALUE (route prefixes contain '/'; encode
 /// everything outside RFC 3986 unreserved so a hostile ref can't split the
-/// query it is embedded in).
-fn query_enc(s: &str) -> String {
+/// query it is embedded in). Shared with client.rs (A4).
+pub(crate) fn query_enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

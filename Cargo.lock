@@ -1260,6 +1260,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "ureq",
  "uuid",
  "zip",
 ]
