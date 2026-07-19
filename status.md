@@ -1612,6 +1612,45 @@ S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
    The provider system is the existence proof that the model works; H-2..H-5
    are that proof turned toward the engine's own dependencies.
 
+   NEXT PORT (DESIGNATED, not yet built) — outbound-http (H-3). Documented
+   here so the design is on record before code (spec-first). It ships as the
+   SECOND hexagonal slice; when built it follows the SPEC-AMENDMENT-4 shape.
+   - WHY NOW (the H-3 guardrail — a second real adapter IS demanded): (i) the
+     egress ALLOWLIST the SSRF finding wanted (status.md §S refuted it as
+     "intended E4 design, but a demand-driven hardening" — that demand is now
+     here), and (ii) a record-replay MOCK for deterministic workflow/agent
+     tests. Two real adapters, so the port is earned, not speculative.
+   - THE SEAM — there are THREE outbound sites today and they split in two:
+     the ureq TRANSPORT is shared by host.rs `do_http_request` (workflow
+     `http-request`) and provider.rs (effectful providers); the proxy uses a
+     DIFFERENT transport (wasmtime-wasi-http via `KeelHooks::send_request`).
+     So the slice is TWO related ports, not one:
+     * `EgressPolicy { fn check(&self, host: &str, port: u16) -> Result<(),
+       Denied> }` — a CROSS-CUTTING policy consulted at ALL THREE sites before
+       any connection. Default adapter = allow-all (today's behaviour); second
+       adapter = the SSRF allowlist (reject loopback / link-local / RFC-1918 /
+       ULA, resolve-then-pin the IP so DNS-rebinding can't slip past the check,
+       IPv6-aware). A denial is DATA (the guest's own error path), NEVER a trap
+       — the exact E4 posture the proxy grant already uses.
+     * `OutboundHttp` — the ureq TRANSPORT behind host.rs/provider.rs, with the
+       default ureq adapter + a record-replay mock. The proxy keeps wasi-http
+       (its transport is the guest-driven WASI machinery); it consults the SAME
+       `EgressPolicy` inside `KeelHooks`, so one allowlist covers all paths.
+   - CONTRACT (what stays ABOVE the port, unchanged): journaling
+     (journal-commit-before-return), the v2.1 secret redaction, and the v2.3
+     idempotency-key injection are all engine-side — the port is transport +
+     policy only, never the durability or the security envelope. This is why
+     swapping ureq for a mock (or adding an allowlist) can't weaken any
+     invariant, same as the secret-store port.
+   - PAYOFF: one adapter closes the SSRF surface on ALL outbound paths at once
+     (not a per-call flag), and the mock makes "test an agent's tool-loop with
+     recorded HTTP" (the M2 moonshot) real. SIZE: medium — the EgressPolicy
+     half is the valuable, smaller piece; do it first, mock second.
+   - GATE (when built): a workflow/provider/proxy outbound to a loopback /
+     RFC-1918 target is DENIED in-band (DATA, engine healthy) under the
+     allowlist adapter and ALLOWED under the default; the mock replays a
+     recorded response without a live socket. No WIT change; no guest rebuilds.
+
    S.3 — DONE THIS PASS: (a) S-FIX-1 taken all the way — the residual is
    CLOSED by the budget-denial + clamp + epoch bound (no watchdog needed; see
    the S-FIX-1 entry) and gate-proven; (b) accept_hardv41.sh WRITTEN + PASSING
