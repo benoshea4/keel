@@ -1238,6 +1238,17 @@ R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
    from clean + the FULL 24-gate suite green + clippy -D warnings + 53
    unit tests. NO keel-WIT change — v3.x guests did not rebuild.
 
+   SHIP CHAIN, all three approved stages (2026-07-19): v3.4 tag on
+   c44e31c2172f, v3.5 tag on 121a93f33256, v4.0 tag on 14cb8d1a734e —
+   each: CI green on the exact SHA → gh release create --target →
+   release.yml success → 6 assets (linux x86_64/arm64 + macOS arm64 +
+   sha256s) verified via the releases LIST endpoint. §R is fully
+   executed. THE SHELF NOW: P-IDEA-4 (`keel new` templates), -5
+   (cron→functions), -7 (usage export), -8 (public playground), kv-cas
+   (named in Amendment 2), provider host-kv, native replication (cloud-
+   gated), authority()=Some for proxy guests (accepted-cost follow-up).
+   All demand-driven — nothing starts without the user's word.
+
    Why this order (founder voice): v3.4 is a day of polish that makes
    every demo feel professional (304s, favicon, `keel ls`) and closes
    the audit; v3.5 is SMALL, pure-keel, completes the "real apps" story
