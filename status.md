@@ -49,6 +49,8 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_phase5.sh                          # must print PHASE 5 PASS (judge + metering + watchdog, v2.8)
 ./scripts/accept_phase6.sh                          # must print PHASE 6 PASS (hosted apps, v3.0; needs trunk)
 ./scripts/accept_operate.sh                         # must print OPERATE PASS (rate limits/logs/retention, v3.1)
+./scripts/accept_cli.sh                             # must print CLI PASS (client verbs, v3.2)
+./scripts/accept_harden.sh                          # must print HARDEN PASS (caps/sanitized faults/timeouts, v3.3)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -822,7 +824,7 @@ P. **The v3.2 audit + forward plan (2026-07-19).** Written on user request
    exactness, and journal invariants all hold.)
 
    ANGRY REVIEWER — THE FIX LIST (severity-ordered):
-   - [ ] P-FIX-1 (P0, info disclosure): PUBLIC-plane errors leak internals.
+   - [x] P-FIX-1 (P0, info disclosure): PUBLIC-plane errors leak internals.
      dispatch.rs answers /fn/* and /apps/* engine faults with
      `{"error": format!("{e:#}")}` — full anyhow chains: module hashes, db
      paths, wasmtime compile errors, all to tokenless callers. Remedy:
@@ -830,7 +832,7 @@ P. **The v3.2 audit + forward plan (2026-07-19).** Written on user request
      tracing::error with the chain; CONTROL plane keeps verbatim errors
      (operators are authed). Gate: probe asserts no hash/path in a
      provoked public 500.
-   - [ ] P-FIX-2 (P0, availability): NO global cap on concurrent function
+   - [x] P-FIX-2 (P0, availability): NO global cap on concurrent function
      execution. Every /fn and /apps/api request parks one spawn_blocking
      thread for its whole run (up to time_limit_ms); the judge ALSO
      spawn_blockings per submission, uncapped, into the same default
@@ -840,18 +842,18 @@ P. **The v3.2 audit + forward plan (2026-07-19).** Written on user request
      "at capacity" — honest backpressure beats queueing forever) + a judge
      concurrency of 1 with a bounded queue. Gate: flood a slow fixture,
      assert 503s + engine stays healthy + workflows unaffected.
-   - [ ] P-FIX-3 (P1, perf): every /fn request reads the FULL module BLOB
+   - [x] P-FIX-3 (P1, perf): every /fn request reads the FULL module BLOB
      from SQLite before checking the compiled cache — invoke_handler does
      get_module_wasm() then shared.component(hash, &wasm), which ignores
      the bytes on a hit. MB-scale copy per request for nothing. Remedy:
      component_cached(hash) fast path first; read bytes only on miss.
-   - [ ] P-FIX-4 (P1, memory): the compiled-component cache is UNBOUNDED
+   - [x] P-FIX-4 (P1, memory): the compiled-component cache is UNBOUNDED
      (components: Mutex<HashMap>) — 500 uploaded modules = 500 JIT images
      held forever; first-compile also happens UNDER the cache lock
      (documented as accepted; re-evaluate with the cap). Remedy: small LRU
      (--max-compiled-modules, default ~64) — wasmtime Components are
      Arc-backed so eviction is safe while instances run.
-   - [ ] P-FIX-5 (P1, robustness): no read/response timeout on the data
+   - [x] P-FIX-5 (P1, robustness): no read/response timeout on the data
      plane — a slow-drip 10 MiB body holds a connection + async task
      indefinitely (extract_raw's to_bytes has no deadline). Remedy: a
      timeout layer (~30s) on /fn + /apps routes only (control plane and UI
@@ -919,6 +921,101 @@ P. **The v3.2 audit + forward plan (2026-07-19).** Written on user request
    percentiles); then Amendment 2 for IDEA-1/2/3 (spec first, code
    second — same discipline as Amendment 1). Everything stays
    demand-driven: nothing above starts without the user's word.
+
+
+Q. **v3.3 "harden" — P-FIX-1..5 built and shipped (2026-07-19).** The user's
+   go-ahead ("continue with status.md unprompted") picked up §P's recommended
+   sequence; v3.3 is its first slice. No spec amendment: no WIT change, no new
+   API surface beyond serve flags — §P is the governing plan (hardening
+   existing behavior, not extending the platform). All five fixes landed in
+   one pass, gate-proven:
+   - [x] Q.1 (P-FIX-3/4, core): ComponentCache — bounded LRU keyed by
+     last-touch tick (linear eviction scan; cap default 64 via
+     --max-compiled-modules / EngineOptions.max_compiled_modules).
+     component_cached(hash, loader) is the new choke point: hash-first
+     lookup, module BLOB read ONLY on a compile miss; first-compiles
+     serialize on a dedicated compile_lock OUTSIDE the cache lock (a hit
+     never waits behind a compile; N concurrent cold requests = ONE
+     compile). component(hash, bytes) kept as a loader-closure wrapper —
+     preflight/run_workflow/judge untouched. Accepted tradeoffs (documented
+     in code): one extra byte-copy on cold workflow starts; cold compiles
+     of DISTINCT modules serialize. wasmtime Components are Arc-backed, so
+     evicting one with live instances is safe. keel_compiled_cache_size
+     gauge. Unit tests: loader-skipped-on-hit, LRU eviction order (2 new,
+     suite = 44).
+   - [x] Q.2 (P-FIX-2, core): EngineShared.fn_sem (Arc<tokio Semaphore>,
+     --max-fn-concurrent permits, default 64) + judge_sem (1 permit,
+     hardcoded — identical budgets keep verdicts comparable) +
+     fn_over_capacity counter. core gains tokio {features=["sync"]} ONLY
+     (runtime-independent primitives; the core stays thread-based).
+   - [x] Q.3 (P-FIX-2, engine): dispatch_fn try-acquires an OWNED permit in
+     ASYNC context — after extract_raw (a dripping client must not hold an
+     execution slot) and before spawn_blocking (an over-cap request never
+     touches the pool; the permit also bounds the pool's queue depth from
+     the data plane). serve_app takes a borrowed permit ONLY on the api/*
+     branch — asset serving stays up under function saturation
+     (gate-asserted). 503 {"error":"engine at capacity"} + Retry-After: 1 +
+     keel_fn_over_capacity_total; 503s write NO ledger row. Judge:
+     create_submission wraps its spawn_blocking in tokio::spawn { permit =
+     judge_sem.acquire_owned().await; ... } — queued submissions cost no
+     thread, 202-now preserved, permit held across the blocking join. If a
+     timeout (P-FIX-5) drops the request future mid-run, the permit rides
+     INSIDE the closure and frees only when the run actually ends — still
+     correctly bounded.
+   - [x] Q.4 (P-FIX-1, engine): dispatch.rs internal_error(context, e) —
+     public plane answers {"error":"internal error"} constant; the full
+     chain goes to tracing::error prefixed "public-plane" (greppable).
+     All seven format!("{e:#}") sites replaced (run_function engine-fault,
+     open_conn ×2, list_routes, admit ×2, get_app, get_asset, both join
+     errors). Sandbox OUTCOME bodies ({"outcome":"tle"} etc.) and 404s
+     naming caller-supplied refs stay — they describe the caller's own
+     request, not engine internals. Verified: NO immutable gate assertion
+     depended on the old leaky bodies (accept_phase5's public 500 assert is
+     outcome-shaped).
+   - [x] Q.5 (P-FIX-5, engine): tower-http TimeoutLayer
+     (with_status_code 408 — ::new is deprecated and -D warnings would eat
+     it) route-scoped on /fn/{*rest} + /apps/{*full} only;
+     --data-timeout-secs default 30, clamped >= 1. Covers body upload AND
+     execution — operators must keep it above their largest
+     time_limit_ms (docs/operations.md). Control plane, UI polls, login:
+     untouched.
+   - [x] Q.6 fleet.rs: per-tenant max_fn_concurrent / max_compiled_modules
+     / data_timeout_secs passthrough (a tenant's flood stays its own
+     problem).
+   - [x] Q.7 fixture guests/burn-fn (world handler): black_box busy-loop
+     (the phase-5 LLVM lesson) that a quota must end — bound with huge fuel
+     + time_limit_ms 2000, every request deterministically holds a slot
+     ~2s with outcome tle. Committed like echo-fn (Cargo.lock +
+     bindings.rs in).
+   - [x] Q.8 gate scripts/accept_harden.sh (#21, in CI after accept_cli):
+     compile-fail module (\0asm + junk passes the upload door check,
+     fails Component::new — chosen because wrong-WORLD modules fail at
+     instantiate, which classify() records as a trap OUTCOME, not an
+     engine fault) → 500 body EXACTLY {"error":"internal error"}, no
+     hash/wasm/compil substrings, "public-plane" in engine.log, 0 ledger
+     rows; saturation anatomy probe (2 background burns → 503 +
+     Retry-After: 1 + body) while /apps/h/ assets still 200; burst 6 at
+     cap 2 → EXACTLY 2×500(tle)/4×503, keel_fn_over_capacity_total == 5
+     (1 anatomy + 4 burst), burn ledger rows == 4 all tle, /fn/e 200
+     after (permits free); 2 back-to-back submissions both AC (judge
+     queue drains); keel_compiled_cache_size == 2 exactly after 3
+     distinct modules (echo, burn, sum — deterministic: bad never
+     compiles, both submissions share sum's hash) + evicted module
+     re-serves 200; python3 slow-drip socket → 408 at
+     --data-timeout-secs 4 (4 > the ~2.1s burn ceiling — margin for slow
+     CI), happy path 200 after. Engine caps in-gate: fn 2 / cache 2 /
+     timeout 4.
+   - [x] Q.9 docs: operations.md 3 flag rows + bounded-public-plane
+     paragraph + fleet optional keys; ROADMAP v3.3 row; status.md
+     cheatsheet → 21 scripts (also backfilled the accept_cli.sh line v3.2
+     forgot); .gitignore accept-hard debris (the rl-*.body lesson).
+   - [x] Q.10 suite: accept_harden ×2 from clean + ALL 21 gates green in
+     foreground chunks on an idle machine + 44 unit tests + clippy
+     --release -D warnings clean.
+   Angry-review findings: the instantiate-vs-compile probe correction
+   (caught at design time, above); everything else accepted-with-comment
+   (copy on cold start, serialized cold compiles). No code defects
+   survived to commit.
 
 ---
 
@@ -1108,3 +1205,5 @@ rails:
   success or failure — a stray keel means someone ran it by hand).
 - A workflow you just want GONE: `POST /api/workflows/<id>/cancel` — works on
   parked AND spinning guests; 409 if it is mid-host-call (retry) or terminal.
+
+---

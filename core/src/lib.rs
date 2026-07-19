@@ -58,6 +58,16 @@ pub struct EngineOptions {
     /// not epochs, because parked workflows spend zero and replay consumes
     /// exactly what the original did.
     pub wf_fuel_limit: u64,
+    /// v3.3 (P-FIX-2) — max concurrently EXECUTING function/app-backend
+    /// sandboxes. Each run parks one blocking thread for its whole quota;
+    /// beyond the cap the data plane answers 503 instead of exhausting the
+    /// pool. Per-ref rate limits don't compose into a global bound — this is
+    /// the global bound.
+    pub max_fn_concurrent: u32,
+    /// v3.3 (P-FIX-4) — max compiled components held in the in-memory cache
+    /// (LRU beyond it). A JIT image is MBs; 500 uploaded modules must not
+    /// mean 500 images held forever.
+    pub max_compiled_modules: usize,
 }
 
 impl EngineOptions {
@@ -71,6 +81,8 @@ impl EngineOptions {
             providers: Vec::new(),
             providers_effectful: Vec::new(),
             wf_fuel_limit: 10_000_000_000_000,
+            max_fn_concurrent: 64,
+            max_compiled_modules: 64,
         }
     }
 }

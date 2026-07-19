@@ -1,0 +1,26 @@
+# v3.3 acceptance guest (status.md §P P-FIX-2) — the SLOW function: world
+# `handler`, burns CPU until a quota kills it. accept_harden.sh binds it with
+# huge fuel and a small time-limit-ms so every request deterministically holds
+# an execution slot for the full time quota, which is what makes the global
+# --max-fn-concurrent cap observable from outside.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "burn-fn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:burn-fn"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "handler"

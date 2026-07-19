@@ -30,6 +30,35 @@ fn json_err(status: StatusCode, body: serde_json::Value) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
+/// v3.3 (P-FIX-1): the public plane never explains an engine fault. Callers
+/// here are tokenless, and anyhow chains carry module hashes, db paths and
+/// compile errors — the full chain goes to tracing (greppable via
+/// "public-plane"), the wire gets a constant. The CONTROL plane keeps
+/// verbatim errors: operators are authed and need them.
+fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
+    tracing::error!("public-plane {context}: {e}");
+    json_err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": "internal error"}),
+    )
+}
+
+/// v3.3 (P-FIX-2): the global sandbox cap's answer. A flat Retry-After of 1s
+/// is honest here — permits free as fast as running functions finish, and the
+/// engine can't predict which quota (time, fuel, memory) ends one first.
+fn over_capacity(shared: &EngineShared) -> Response {
+    shared
+        .fn_over_capacity
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut resp = json_err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"error": "engine at capacity"}),
+    );
+    resp.headers_mut()
+        .insert(axum::http::header::RETRY_AFTER, HeaderValue::from(1));
+    resp
+}
+
 /// Amendment 1 (A1): the 429. Retry-After comes from when the oldest
 /// in-window ledger row actually ages out, not a flat 60.
 fn rate_limited(limit: i64, retry_after_ms: i64) -> Response {
@@ -111,9 +140,12 @@ pub fn run_function(
         body: raw.body,
     };
     match function::invoke_handler(shared, kind, refname, module_hash, quota, wreq) {
-        Err(e) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": format!("{e:#}")}),
+        // Engine fault (db/compile/instantiate) — excluded from the ledger,
+        // and (P-FIX-1) excluded from the wire: the caller's own function
+        // never produced this, so the detail belongs to the operator's log.
+        Err(e) => internal_error(
+            &format!("invoking {kind} {refname}"),
+            format!("{e:#}"),
         ),
         Ok(inv) => match (inv.outcome, inv.response) {
             (Outcome::Ok, Some(resp)) => {
@@ -152,24 +184,25 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    // v3.3 (P-FIX-2): the global execution permit — taken AFTER the body is
+    // buffered (a slow client must not hold a sandbox slot while it dribbles)
+    // and BEFORE spawn_blocking (an over-cap request 503s without touching
+    // the thread pool at all, which is the entire point of the cap). At
+    // capacity even would-be 404s/429s get the 503 — the engine IS at
+    // capacity, and a permit-then-classify order is what keeps the pool
+    // bounded.
+    let Ok(permit) = Arc::clone(&shared.fn_sem).try_acquire_owned() else {
+        return over_capacity(&shared);
+    };
     let res = tokio::task::spawn_blocking(move || {
+        let _permit = permit; // held route-match through sandbox exit
         let conn = match db::open_conn(&shared.db_path) {
             Ok(c) => c,
-            Err(e) => {
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": format!("{e:#}")}),
-                )
-            }
+            Err(e) => return internal_error("opening db for /fn dispatch", format!("{e:#}")),
         };
         let routes = match db::list_routes(&conn) {
             Ok(r) => r,
-            Err(e) => {
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": format!("{e:#}")}),
-                )
-            }
+            Err(e) => return internal_error("route lookup", format!("{e:#}")),
         };
         // Longest-prefix match ON SEGMENT BOUNDARIES: /fn/echo matches
         // /fn/echo and /fn/echo/..., never /fn/echo2 — so the guest path is
@@ -195,12 +228,7 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
         let admission =
             match function::admit(&shared, &conn, "function", &route.prefix, route.rate_limit) {
                 Ok(a) => a,
-                Err(e) => {
-                    return json_err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        json!({"error": format!("{e:#}")}),
-                    )
-                }
+                Err(e) => return internal_error("admission", format!("{e:#}")),
             };
         let _guard = match admission {
             Admission::Admitted(g) => g,
@@ -227,12 +255,7 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
         run_function(&shared, "function", &prefix, &hash, quota, raw, guest_path)
     })
     .await;
-    res.unwrap_or_else(|e| {
-        json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": format!("function task panicked: {e}")}),
-        )
-    })
+    res.unwrap_or_else(|e| internal_error("function task panicked", e))
 }
 
 // --- Micro-cloud phase 6: app serving (the other public data plane) ---------
@@ -286,33 +309,20 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
         };
         let conn = match db::open_conn(&shared.db_path) {
             Ok(c) => c,
-            Err(e) => {
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": format!("{e:#}")}),
-                )
-            }
+            Err(e) => return internal_error("opening db for app serving", format!("{e:#}")),
         };
         let app = match db::get_app(&conn, &name) {
             Ok(Some(a)) => a,
             Ok(None) => {
                 return json_err(StatusCode::NOT_FOUND, json!({"error": format!("no app '{name}'")}))
             }
-            Err(e) => {
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": format!("{e:#}")}),
-                )
-            }
+            Err(e) => return internal_error("app lookup", format!("{e:#}")),
         };
         let serve_asset = |conn: &keel_core::rusqlite::Connection, path: &str| {
             match db::get_asset(conn, &name, path) {
                 Ok(Some((ct, bytes))) => Some(asset_response(&ct, bytes)),
                 Ok(None) => None,
-                Err(e) => Some(json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": format!("{e:#}")}),
-                )),
+                Err(e) => Some(internal_error("asset read", format!("{e:#}"))),
             }
         };
         // 1. the app root
@@ -336,15 +346,19 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
                     json!({"error": format!("app '{name}' has no backend function")}),
                 );
             };
+            // v3.3 (P-FIX-2): the api/* branch is the only app path that
+            // spins up a sandbox, so it alone takes a global permit — asset
+            // serving stays up even when function capacity is saturated. We
+            // are already ON a pool thread here (the asset/app lookup above
+            // needed one, exactly like every control-plane handler); what the
+            // permit bounds is the LONG occupancy of the run itself.
+            let Ok(_permit) = shared.fn_sem.try_acquire() else {
+                return over_capacity(&shared);
+            };
             // A1 — same admission as /fn/*, keyed (kind 'app', app name).
             let admission = match function::admit(&shared, &conn, "app", &name, app.rate_limit) {
                 Ok(a) => a,
-                Err(e) => {
-                    return json_err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        json!({"error": format!("{e:#}")}),
-                    )
-                }
+                Err(e) => return internal_error("admission", format!("{e:#}")),
             };
             let _guard = match admission {
                 Admission::Admitted(g) => g,
@@ -376,10 +390,5 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
         json_err(StatusCode::NOT_FOUND, json!({"error": format!("no asset '{rest}'")}))
     })
     .await;
-    res.unwrap_or_else(|e| {
-        json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": format!("app task panicked: {e}")}),
-        )
-    })
+    res.unwrap_or_else(|e| internal_error("app task panicked", e))
 }

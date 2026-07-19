@@ -32,6 +32,10 @@ mime_guess = "2"
 # Same crate+version core already uses for the http-request host call.
 ureq = { version = "2", features = ["tls"] }
 clap = { version = "4", features = ["derive", "env"] }   # env: KEEL_API_TOKEN (v1.1 auth)
+# v3.3 (P-FIX-5) — whole-request deadline on the public data plane. tower-http's
+# TimeoutLayer (unlike tower's) answers 408 itself, so it composes with axum
+# routes without a HandleErrorLayer.
+tower-http = { version = "0.6", features = ["timeout"] }
 askama = "0.12"          # phase 2 (templates); unused until Task 2.8
 tracing = "0.1"
 tracing-subscriber = "0.3"

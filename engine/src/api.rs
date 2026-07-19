@@ -748,6 +748,18 @@ pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, 
         "keel_fn_rate_limited_total {}\n",
         shared.fn_rate_limited.load(std::sync::atomic::Ordering::Relaxed)
     ));
+    // v3.3 (P-FIX-2/4) — the global-cap rejections and the bounded compile
+    // cache, both observable so accept_harden.sh can assert them from outside.
+    out.push_str("# HELP keel_fn_over_capacity_total Data-plane requests rejected 503 by --max-fn-concurrent.\n# TYPE keel_fn_over_capacity_total counter\n");
+    out.push_str(&format!(
+        "keel_fn_over_capacity_total {}\n",
+        shared.fn_over_capacity.load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    out.push_str("# HELP keel_compiled_cache_size Compiled components held in memory (bounded by --max-compiled-modules).\n# TYPE keel_compiled_cache_size gauge\n");
+    out.push_str(&format!(
+        "keel_compiled_cache_size {}\n",
+        shared.compiled_cache_size()
+    ));
     Ok(out)
 }
 
@@ -1052,9 +1064,26 @@ pub async fn create_submission(
     let judge_shared = shared.clone();
     let judge_id = id.clone();
     // NOT inline in the handler (ext spec Task 5.2): 202 now, verdict later.
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = keel_core::judge::judge_submission(&judge_shared, &judge_id) {
-            tracing::error!("judging {judge_id} failed (verdict stays NULL): {e:#}");
+    // v3.3 (P-FIX-2): judge runs SERIALIZE on judge_sem (1 permit) — each is
+    // up to 2s × cases of blocking compute, and uncapped they park one pool
+    // thread apiece. The permit is awaited in this cheap async task, so a
+    // queued submission costs no thread while it waits and the 202 above is
+    // unaffected.
+    tokio::spawn(async move {
+        let _permit = Arc::clone(&judge_shared.judge_sem)
+            .acquire_owned()
+            .await
+            .expect("judge semaphore is never closed");
+        let run_shared = judge_shared.clone();
+        let run_id = judge_id.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            if let Err(e) = keel_core::judge::judge_submission(&run_shared, &run_id) {
+                tracing::error!("judging {run_id} failed (verdict stays NULL): {e:#}");
+            }
+        })
+        .await; // the permit is held until the blocking run finishes
+        if let Err(e) = joined {
+            tracing::error!("judge task for {judge_id} panicked: {e}");
         }
     });
     Ok((StatusCode::ACCEPTED, Json(json!({"id": id}))))

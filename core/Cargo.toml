@@ -19,3 +19,6 @@ sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
+# v3.3 (status.md §P P-FIX-2) — sync only: Semaphore for the data-plane and
+# judge concurrency caps. Runtime-independent; the core stays thread-based.
+tokio = { version = "1", features = ["sync"] }

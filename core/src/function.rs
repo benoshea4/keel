@@ -217,9 +217,12 @@ pub fn invoke_handler(
     req: HttpRequest,
 ) -> Result<Invocation> {
     let conn = db::open_conn(&shared.db_path)?;
-    let wasm = db::get_module_wasm(&conn, module_hash)?
-        .with_context(|| format!("module {module_hash} not found"))?;
-    let component = shared.component(module_hash, &wasm)?;
+    // v3.3 (P-FIX-3): hash-first — the module BLOB is only read on a compile
+    // miss, not copied out of SQLite on every request.
+    let component = shared.component_cached(module_hash, || {
+        db::get_module_wasm(&conn, module_hash)?
+            .with_context(|| format!("module {module_hash} not found"))
+    })?;
 
     let ctx = FnCtx {
         db: conn,

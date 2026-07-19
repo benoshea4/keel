@@ -19,6 +19,9 @@ Flags that matter in production:
 | `--wf-fuel-limit` | 10^13 | Micro-cloud phase 4 — per-run/resume workflow fuel budget (a runaway kill-switch, not a quota). An infinite loop fails with `runaway guest: exhausted compute budget`; parked workflows spend zero; replay resets to the full budget. Raise it only if a legitimate very-long replay ever trips it. |
 | `--retain-terminal-hours` | 0 (keep forever) | GC completed/failed workflows (journal, events, snapshots, kv included) after this many hours. |
 | `--retain-ledger-hours` | 0 (keep forever) | Amendment 1: GC invocations-ledger rows and captured function logs after this many hours. Rate limits read a 60-second window, so hours-scale retention can't interact with them. |
+| `--max-fn-concurrent` | 64 | v3.3: max concurrently executing function/app-backend sandboxes, process-wide. Each run parks one blocking thread for its full quota; beyond the cap the data plane answers `503` + `Retry-After: 1` (`keel_fn_over_capacity_total`). Per-route rate limits bound admission per ref — this bounds the process. |
+| `--max-compiled-modules` | 64 | v3.3: compiled components held in memory (LRU beyond it; `keel_compiled_cache_size`). A JIT image is MBs — size to your hot module count; eviction is transparent (recompile on next use). |
+| `--data-timeout-secs` | 30 | v3.3: whole-request deadline on `/fn/*` and `/apps/*` (`408` beyond it) — a slow-drip body can no longer hold a connection forever. Covers upload AND execution: keep it above your largest route `time_limit_ms`. Control plane and UI are unaffected. |
 | `--backup-dir` + `--backup-interval-secs` + `--backup-keep` | off / 300 / 24 | Periodic online snapshots (below). |
 | `--secrets-file` | unset | KEY=VALUE file backing the `secret` host call (below). |
 | `--provider name=path.wasm` | none | Register a PURE capability provider (repeatable) — see [PROVIDERS.md](../PROVIDERS.md). Import-free, enforced. Compiled + type-checked at boot; a bad provider fails the start. v2.6: flags UPSERT into the provider REGISTRY — the provider persists across restarts; remove with `DELETE /api/providers/{name}`, and providers can also be uploaded/rolled live via `POST /api/providers` (no restart). |
@@ -52,6 +55,16 @@ survive restarts. Over the limit → 429 with an honest `Retry-After`; watch
 `keel_fn_rate_limited_total` in `/metrics`. Pair with
 `--retain-ledger-hours` so the ledger and captured function logs can't grow
 a public listener's disk without bound.
+
+v3.3 closes the remaining unbounded dimensions. `--max-fn-concurrent` caps
+concurrently *executing* sandboxes process-wide (503 beyond it — honest
+backpressure; asset serving takes no execution slot, so a hosted app's
+frontend stays up even when its functions are saturated), judge runs
+serialize instead of stacking blocking threads, and `--data-timeout-secs`
+puts a whole-request deadline on the data plane. Engine faults on the public
+plane answer a generic `{"error":"internal error"}` — the full error chain
+lands in the engine log (grep `public-plane`), because tokenless callers
+don't get module hashes, database paths, or compiler output.
 
 ## Secrets
 
@@ -127,6 +140,7 @@ db = "acme.db"
 api_token = "..."      # per-tenant root credential
 # optional per-tenant: max_running, max_guest_memory_mb,
 # retain_terminal_hours, retain_ledger_hours, backup_dir, backup_interval_secs, backup_keep,
+# max_fn_concurrent, max_compiled_modules, data_timeout_secs (v3.3 — a tenant's flood stays its own problem),
 # secrets_file (per-tenant secrets — cells never share one),
 # providers = ["name=path.wasm", ...] (per-tenant capability providers)
 # providers_effectful = ["name=path.wasm", ...] (v2.5 — per-tenant effectful grants)

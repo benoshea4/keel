@@ -32,13 +32,59 @@ use crate::host::{AbortForUpgrade, Ctx, Workflow, WorkflowPre};
 use crate::journal::JournalCtx;
 use crate::notifier::Notifier;
 
+/// v3.3 (P-FIX-4) — the compiled-component cache, bounded. Entries carry a
+/// last-touch tick; eviction removes the smallest. The cap is small (default
+/// 64), so a linear eviction scan is simpler than a linked LRU and just as
+/// fast. Component is Arc-backed: evicting one that live instances still use
+/// is safe — they hold their own handle, the cache only drops ITS clone.
+struct ComponentCache {
+    map: HashMap<String, (Component, u64)>,
+    tick: u64,
+}
+
+impl ComponentCache {
+    /// A hit refreshes the entry's recency.
+    fn get(&mut self, hash: &str) -> Option<Component> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.get_mut(hash).map(|e| {
+            e.1 = tick;
+            e.0.clone()
+        })
+    }
+
+    fn insert(&mut self, hash: &str, c: Component, cap: usize) {
+        if !self.map.contains_key(hash) && self.map.len() >= cap.max(1) {
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.insert(hash.to_string(), (c, tick));
+    }
+}
+
 /// Process-wide shared state (one per `keel serve`).
 pub struct EngineShared {
     pub db_path: String,
     pub engine: wasmtime::Engine,
-    /// Compiled-component cache keyed by module sha256. Compilation takes real time;
-    /// Component is Arc-backed, so clones out of the cache are cheap.
-    components: Mutex<HashMap<String, Component>>,
+    /// Compiled-component cache keyed by module sha256. Compilation takes real
+    /// time; clones out of the cache are cheap (Arc-backed). Bounded — see
+    /// ComponentCache above.
+    components: Mutex<ComponentCache>,
+    /// v3.3 (P-FIX-4) — first-compiles serialize HERE, not under the cache
+    /// lock: a cache hit never waits behind a compile, and N concurrent
+    /// requests for a cold module produce ONE compile (losers re-check the
+    /// cache after the winner inserts).
+    compile_lock: Mutex<()>,
+    /// --max-compiled-modules.
+    max_components: usize,
     /// One process-wide Agent (Arc-backed, cheap to clone); 30s per-request timeout.
     pub http: ureq::Agent,
     /// Wake-up latency optimization for parked threads + phase-3 abort flags
@@ -86,6 +132,20 @@ pub struct EngineShared {
     /// ledger row — admission isn't a sandbox outcome). /metrics exposes it
     /// as keel_fn_rate_limited_total.
     pub fn_rate_limited: std::sync::atomic::AtomicU64,
+    /// v3.3 (P-FIX-2) — the global sandbox-execution cap (--max-fn-concurrent
+    /// permits). tokio's Semaphore, runtime-independent: the dispatcher
+    /// try-acquires in async context so an over-cap request 503s WITHOUT ever
+    /// touching the blocking pool. Arc'd for acquire_owned.
+    pub fn_sem: Arc<tokio::sync::Semaphore>,
+    /// v3.3 (P-FIX-2) — judge runs serialize (1 permit): each is up to
+    /// 2s × cases of blocking compute, and submissions already answer 202 +
+    /// poll, so queueing (awaited in a cheap async task) is honest here in a
+    /// way it wouldn't be for a live HTTP caller.
+    pub judge_sem: Arc<tokio::sync::Semaphore>,
+    /// v3.3 (P-FIX-2) — total 503'd data-plane requests since boot; /metrics
+    /// exposes it as keel_fn_over_capacity_total (no ledger row, same
+    /// reasoning as fn_rate_limited).
+    pub fn_over_capacity: std::sync::atomic::AtomicU64,
 }
 
 impl EngineShared {
@@ -99,6 +159,8 @@ impl EngineShared {
             providers: provider_bytes,
             providers_effectful: provider_effectful_bytes,
             wf_fuel_limit,
+            max_fn_concurrent,
+            max_compiled_modules,
         } = opts;
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
@@ -194,7 +256,12 @@ impl EngineShared {
         Ok(EngineShared {
             db_path,
             engine,
-            components: Mutex::new(HashMap::new()),
+            components: Mutex::new(ComponentCache {
+                map: HashMap::new(),
+                tick: 0,
+            }),
+            compile_lock: Mutex::new(()),
+            max_components: max_compiled_modules.max(1),
             http: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
                 .build(),
@@ -211,6 +278,9 @@ impl EngineShared {
             providers: Arc::new(std::sync::RwLock::new(providers)),
             fn_inflight: Mutex::new(HashMap::new()),
             fn_rate_limited: std::sync::atomic::AtomicU64::new(0),
+            fn_sem: Arc::new(tokio::sync::Semaphore::new(max_fn_concurrent.max(1) as usize)),
+            judge_sem: Arc::new(tokio::sync::Semaphore::new(1)),
+            fn_over_capacity: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -248,21 +318,47 @@ impl EngineShared {
         self.threads.lock().unwrap().len()
     }
 
-    /// pub for the upgrade pre-flight (api.rs via preflight() below); the cache
-    /// only ever holds components that compiled successfully.
-    pub fn component(&self, hash: &str, wasm: &[u8]) -> Result<Component> {
-        let mut cache = self.components.lock().unwrap();
-        if let Some(c) = cache.get(hash) {
-            return Ok(c.clone());
+    /// v3.3 (P-FIX-3) — hash-first component lookup: the caller pays for the
+    /// module BLOB only on a compile miss (a /fn hit used to copy MBs out of
+    /// SQLite per request just to ignore them). The cache only ever holds
+    /// components that compiled successfully.
+    pub fn component_cached(
+        &self,
+        hash: &str,
+        load: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<Component> {
+        if let Some(c) = self.components.lock().unwrap().get(hash) {
+            return Ok(c);
         }
-        // Compiling while holding the lock serializes first-compiles of distinct
-        // modules — accepted at hobby scale (SPEC.md §1: simple and correct first).
+        // Cold path: compile OUTSIDE the cache lock (P-FIX-4) — hits above
+        // never wait behind a compile. The compile lock makes a cold popular
+        // module compile once; losers of the race re-check and return.
+        let _compiling = self.compile_lock.lock().unwrap();
+        if let Some(c) = self.components.lock().unwrap().get(hash) {
+            return Ok(c);
+        }
+        let wasm = load()?;
         // map_err: wasmtime 43's own Error type doesn't take anyhow's .context directly
-        let c = Component::new(&self.engine, wasm)
+        let c = Component::new(&self.engine, &wasm)
             .map_err(anyhow::Error::from)
             .context("compiling module")?;
-        cache.insert(hash.to_string(), c.clone());
+        self.components
+            .lock()
+            .unwrap()
+            .insert(hash, c.clone(), self.max_components);
         Ok(c)
+    }
+
+    /// pub for the upgrade pre-flight (api.rs via preflight() below) and every
+    /// caller that already holds the bytes — they only get copied on a miss.
+    pub fn component(&self, hash: &str, wasm: &[u8]) -> Result<Component> {
+        self.component_cached(hash, || Ok(wasm.to_vec()))
+    }
+
+    /// v3.3 — /metrics gauge keel_compiled_cache_size (the gate asserts the
+    /// --max-compiled-modules bound holds from the outside).
+    pub fn compiled_cache_size(&self) -> usize {
+        self.components.lock().unwrap().map.len()
     }
 }
 
@@ -510,4 +606,75 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::EngineShared;
+
+    /// A real EngineShared on a scratch db — construction compiles no guests
+    /// and the provider registry is empty, so this stays cheap. The wat text
+    /// "(component)" is the smallest valid component (wasmtime's default `wat`
+    /// feature accepts text bytes); cache keys are caller-supplied hashes, so
+    /// one body serves every key.
+    fn test_shared(name: &str, max_compiled: usize) -> EngineShared {
+        let db = std::env::temp_dir().join(format!(
+            "keel-runner-test-{name}-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&db);
+        let mut opts = crate::EngineOptions::new(db.to_string_lossy());
+        opts.max_compiled_modules = max_compiled;
+        EngineShared::new(opts).expect("test EngineShared")
+    }
+
+    fn load_counting(calls: &Cell<u32>) -> impl FnOnce() -> anyhow::Result<Vec<u8>> + '_ {
+        move || {
+            calls.set(calls.get() + 1);
+            Ok(b"(component)".to_vec())
+        }
+    }
+
+    #[test]
+    fn component_cache_hit_skips_the_loader() {
+        // P-FIX-3: the whole point of component_cached is that a hit never
+        // pays for module bytes.
+        let shared = test_shared("hit", 64);
+        let calls = Cell::new(0u32);
+        shared
+            .component_cached("hash-a", load_counting(&calls))
+            .unwrap();
+        shared
+            .component_cached("hash-a", load_counting(&calls))
+            .unwrap();
+        assert_eq!(calls.get(), 1, "second lookup must not invoke the loader");
+        assert_eq!(shared.compiled_cache_size(), 1);
+    }
+
+    #[test]
+    fn component_cache_evicts_least_recently_used() {
+        // P-FIX-4: cap 2; touching A must make B the eviction victim when C
+        // arrives, and the cache never exceeds the cap.
+        let shared = test_shared("lru", 2);
+        let calls = Cell::new(0u32);
+        shared.component_cached("a", load_counting(&calls)).unwrap();
+        shared.component_cached("b", load_counting(&calls)).unwrap();
+        shared
+            .component_cached("a", || panic!("a is cached — loader must not run"))
+            .unwrap();
+        shared.component_cached("c", load_counting(&calls)).unwrap(); // evicts b
+        assert_eq!(shared.compiled_cache_size(), 2);
+        shared
+            .component_cached("a", || panic!("a was touched — must survive"))
+            .unwrap();
+        shared.component_cached("b", load_counting(&calls)).unwrap(); // miss: reload
+        assert_eq!(
+            calls.get(),
+            4,
+            "a, b, c cold + b again after eviction = 4 loads"
+        );
+        assert_eq!(shared.compiled_cache_size(), 2);
+    }
 }

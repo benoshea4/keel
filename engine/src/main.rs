@@ -76,6 +76,23 @@ enum Cmd {
         /// interact with them.)
         #[arg(long, default_value_t = 0)]
         retain_ledger_hours: u64,
+        /// v3.3 (P-FIX-2) — max concurrently executing function/app-backend
+        /// sandboxes across the whole data plane. Each run parks one blocking
+        /// thread for its full quota; beyond the cap requests answer 503 +
+        /// Retry-After instead of exhausting the pool. Per-route rate limits
+        /// bound admission per ref — this bounds the process.
+        #[arg(long, default_value_t = 64)]
+        max_fn_concurrent: u32,
+        /// v3.3 (P-FIX-4) — compiled components held in memory (LRU beyond
+        /// it). A JIT image is MBs; size to your hot module count.
+        #[arg(long, default_value_t = 64)]
+        max_compiled_modules: usize,
+        /// v3.3 (P-FIX-5) — whole-request deadline in seconds on /fn/* and
+        /// /apps/* (408 beyond it). Covers body upload AND execution, so keep
+        /// it above your largest route time-limit-ms. Control plane and UI
+        /// are not affected.
+        #[arg(long, default_value_t = 30)]
+        data_timeout_secs: u64,
         /// v2 DR — write periodic online snapshots (keel-<millis>.db) into this
         /// directory. Consistent while running; restore = copy one back over
         /// --db and start the engine.
@@ -253,6 +270,9 @@ async fn main() -> Result<()> {
             wf_fuel_limit,
             retain_terminal_hours,
             retain_ledger_hours,
+            max_fn_concurrent,
+            max_compiled_modules,
+            data_timeout_secs,
             backup_dir,
             backup_interval_secs,
             backup_keep,
@@ -269,6 +289,9 @@ async fn main() -> Result<()> {
                 wf_fuel_limit,
                 retain_terminal_hours,
                 retain_ledger_hours,
+                max_fn_concurrent,
+                max_compiled_modules,
+                data_timeout_secs,
                 backup_dir,
                 backup_interval_secs,
                 backup_keep,
@@ -310,6 +333,9 @@ async fn serve(
     wf_fuel_limit: u64,
     retain_terminal_hours: u64,
     retain_ledger_hours: u64,
+    max_fn_concurrent: u32,
+    max_compiled_modules: usize,
+    data_timeout_secs: u64,
     backup_dir: Option<String>,
     backup_interval_secs: u64,
     backup_keep: usize,
@@ -370,6 +396,8 @@ async fn serve(
     opts.secrets_path = secrets_file;
     opts.providers = provider_bytes;
     opts.providers_effectful = provider_effectful_bytes;
+    opts.max_fn_concurrent = max_fn_concurrent;
+    opts.max_compiled_modules = max_compiled_modules;
     let engine = keel_core::Engine::open(opts)?;
     let shared = engine.shared();
 
@@ -495,6 +523,9 @@ async fn serve(
         });
     }
 
+    // v3.3 (P-FIX-5) — 0 would reject every request instantly; clamp to 1s.
+    let data_timeout = std::time::Duration::from_secs(data_timeout_secs.max(1));
+
     let app = Router::new()
         .route(
             "/api/modules",
@@ -592,9 +623,29 @@ async fn serve(
         // AFTER the auth layer, so functions (and later apps) are reachable
         // tokenless — a browser-served app must call its own backend. The
         // body cap is enforced inside the dispatcher (10 MiB → 413).
-        .route("/fn/{*rest}", axum::routing::any(dispatch::dispatch_fn))
+        // v3.3 (P-FIX-5): these two routes alone carry a whole-request
+        // deadline — a slow-drip body can no longer hold a connection + task
+        // forever. Route-level layer, so the control plane and the UI's
+        // long-poll partials are untouched.
+        .route(
+            "/fn/{*rest}",
+            axum::routing::any(dispatch::dispatch_fn).layer(
+                tower_http::timeout::TimeoutLayer::with_status_code(
+                    axum::http::StatusCode::REQUEST_TIMEOUT,
+                    data_timeout,
+                ),
+            ),
+        )
         // Phase 6 — app serving: assets + SPA fallback + api/* backend calls.
-        .route("/apps/{*full}", axum::routing::any(dispatch::serve_app))
+        .route(
+            "/apps/{*full}",
+            axum::routing::any(dispatch::serve_app).layer(
+                tower_http::timeout::TimeoutLayer::with_status_code(
+                    axum::http::StatusCode::REQUEST_TIMEOUT,
+                    data_timeout,
+                ),
+            ),
+        )
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;

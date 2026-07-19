@@ -79,6 +79,8 @@ jobs:
         run: ./scripts/accept_operate.sh
       - name: Amendment 1 — the client CLI (v3.2)
         run: ./scripts/accept_cli.sh
+      - name: Hardening — caps, sanitized faults, timeouts (v3.3)
+        run: ./scripts/accept_harden.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

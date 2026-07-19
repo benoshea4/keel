@@ -26,3 +26,9 @@ apps/hello/dist/
 # debug/burst harness debris
 rl-*.body
 rl-*.code
+# accept_harden.sh debris (self-cleaning on pass; a failed run must not
+# leave commit bait — the v3.1 rl-*.body lesson)
+accept-hard.db*
+hard-*.code
+hard.zip
+bad.wasm

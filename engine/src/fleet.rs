@@ -46,6 +46,12 @@ struct Tenant {
     /// Amendment 1 (A3) — per-tenant ledger retention, like everything else
     /// in a cell.
     retain_ledger_hours: Option<u64>,
+    /// v3.3 — per-tenant data-plane bounds (P-FIX-2/4/5): sandbox concurrency
+    /// cap, compiled-cache cap, whole-request deadline. Cells are where these
+    /// matter most — a tenant's flood must stay its own problem.
+    max_fn_concurrent: Option<u32>,
+    max_compiled_modules: Option<usize>,
+    data_timeout_secs: Option<u64>,
     backup_dir: Option<String>,
     backup_interval_secs: Option<u64>,
     backup_keep: Option<usize>,
@@ -119,6 +125,15 @@ fn spawn_tenant(exe: &std::path::Path, t: &Tenant) -> Result<Child> {
     }
     if let Some(v) = t.retain_ledger_hours {
         cmd.arg("--retain-ledger-hours").arg(v.to_string());
+    }
+    if let Some(v) = t.max_fn_concurrent {
+        cmd.arg("--max-fn-concurrent").arg(v.to_string());
+    }
+    if let Some(v) = t.max_compiled_modules {
+        cmd.arg("--max-compiled-modules").arg(v.to_string());
+    }
+    if let Some(v) = t.data_timeout_secs {
+        cmd.arg("--data-timeout-secs").arg(v.to_string());
     }
     if let Some(v) = &t.backup_dir {
         cmd.arg("--backup-dir").arg(v);
