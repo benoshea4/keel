@@ -129,14 +129,14 @@ macro_rules! __export_solver_impl {
 pub(crate) use __export_solver_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.7.0:solver:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.8.0:solver:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
 pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 189] = *b"\
 \0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07A\x01A\x02\x01A\x03\x01\
 j\x01s\x01s\x01@\x01\x05inputs\0\0\x04\0\x05solve\x01\x01\x04\0\x1akeel:workflow\
-/solver@0.7.0\x04\0\x0b\x0c\x01\0\x06solver\x03\0\0\0G\x09producers\x01\x0cproce\
+/solver@0.8.0\x04\0\x0b\x0c\x01\0\x06solver\x03\0\0\0G\x09producers\x01\x0cproce\
 ssed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]

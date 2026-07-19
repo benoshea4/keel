@@ -27,6 +27,11 @@ thin clients of exactly these endpoints — anything they do, curl can do.
 | `POST /api/submissions` | Judge a solver against a problem. JSON `{"problem","module_hash"}`, or multipart `problem`+`file` (stores the module first). → 202 `{"id"}`; judging runs off-thread. Per-case quotas: 10⁹ fuel, 256 MiB, 2000 ms. Verdicts: AC · WA · TLE · MLE · OOF · RE; stops at first non-AC; each case writes a `solve` ledger row. |
 | `GET /api/submissions/{id}` | `{"verdict"}` is null while judging; `detail` = per-case JSON (verdict, fuel, peak_mem, ms). |
 | `POST /api/apps` *(phase 6)* | `{"name","backend_hash"?}` → 201 (`rate_limit`? caps the app's api/* backend calls per rolling 60 s, like routes). Name `[a-z0-9-]{1,32}`; no backend = static-only; re-POST re-binds. |
+| `POST /api/config` *(v3.5, [Amendment 2](SPEC-AMENDMENT-2.md))* | `{"kind":"function"\|"app","ref","name","value"}` → 201 upsert. Per-ref operator config for `platform-api.config-get`. Door checks: name `[A-Za-z0-9_-]{1,64}`, value ≤ 4 KiB, ≤ 64 entries/ref. |
+| `GET /api/config?kind=&ref=` | `{"names":[...]}` — **names only; no endpoint ever echoes a value.** |
+| `DELETE /api/config?kind=&ref=&name=` | 204 / 404. |
+| `GET /api/kv?kind=&ref=` *(v3.5)* | `{"keys":[...]}` — keys only (values are guest state). |
+| `DELETE /api/kv?kind=&ref=` | 204 — wipes the ref's whole kv store ("reset my function"). |
 | `GET /api/apps` *(v3.4)* | `[{name, backend_hash, assets, created_at, rate_limit}]` — the listing `keel ls` reads. |
 | `DELETE /api/apps/{name}` *(v3.4)* | App + its stored assets, one transaction → 204 (404 if absent). Ledger rows and captured logs remain — history is `--retain-ledger-hours`'s job. |
 | `POST /api/apps/{name}/assets` | Body = a zip of the app's `dist/` (64 MiB cap). All-or-nothing: zip-slip entries (`..`, absolute) → 400 with nothing stored; decompressed total capped at 256 MiB (zip bombs → 400). `.wasm`/`.js` content types forced. → `{"stored": N}`. v3.4: each asset stores its sha256 as an `ETag`; serving honors `If-None-Match` → 304, hash-named files (`-<12+ hex>.ext`) get `max-age=31536000, immutable`, `index.html` stays `no-store`. |

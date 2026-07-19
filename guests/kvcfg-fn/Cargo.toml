@@ -1,0 +1,25 @@
+# v3.5 acceptance guest (SPEC-AMENDMENT-2.md A9) — exercises the four new
+# platform-api calls: /cfg → config-get("API_KEY"); /count → kv counter
+# (get → +1 → set); /reset → kv-delete; /big → an over-cap kv-set whose err
+# string becomes the response body.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "kvcfg-fn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:kvcfg-fn"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "handler"

@@ -13,8 +13,13 @@
 // worlds — `handler` (stateless serverless functions) and `solver`
 // (import-free judge submissions). `world workflow` is textually unchanged:
 // workflow guests rebuild against 0.7.0 without source changes.
+// 0.8.0 (Amendment 2, v3.5) added config-get + kv-get/kv-set/kv-delete to
+// platform-api — per-REF operator config and durable function state. New
+// imports only; handler guests rebuild, workflow guests rebuild untouched,
+// solver BINARIES keep working (empty linker). Compiled ≤0.7.0 handler/
+// workflow blobs will not instantiate (0.x minors are blob-incompatible).
 // Never edit an interface in place mid-phase.
-package keel:workflow@0.7.0;
+package keel:workflow@0.8.0;
 
 interface host-api {
     /// v1.2 — http-request's result. status is the raw code (2xx not special);
@@ -120,6 +125,24 @@ interface platform-api {
     /// Fetch a workflow as a JSON string — the same shape as
     /// GET /api/workflows/:id ({"id","status","output",...}). err = unknown id.
     get-workflow: func(id: string) -> result<string, string>;
+
+    /// v3.5 (Amendment 2, A6) — operator-set config for THIS ref (the bound
+    /// route prefix or app name). none = not set. Values are never echoed by
+    /// the control plane; what a guest does with its own key is its choice.
+    config-get: func(name: string) -> option<string>;
+
+    /// v3.5 (A7) — durable per-ref KV. none = key absent. Bytes, not strings.
+    kv-get: func(key: string) -> option<list<u8>>;
+
+    /// v3.5 (A7) — returns ONLY after the row commits (kill -9 after a
+    /// returned set never loses it). err names the violated cap (key ≤ 256 B,
+    /// value ≤ 64 KiB, ≤ 1024 keys/ref, ≤ 8 MiB total/ref). Atomic per call
+    /// and no more: concurrent read-modify-writes race — atomic sequences are
+    /// what workflows are for.
+    kv-set: func(key: string, value: list<u8>) -> result<_, string>;
+
+    /// v3.5 (A7) — absent key is fine (idempotent).
+    kv-delete: func(key: string);
 }
 
 world workflow {

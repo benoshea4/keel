@@ -56,6 +56,13 @@ survive restarts. Over the limit → 429 with an honest `Retry-After`; watch
 `--retain-ledger-hours` so the ledger and captured function logs can't grow
 a public listener's disk without bound.
 
+**Upgrading to v3.5 (WIT 0.8.0) is a guest rebuild event.** The wit package
+version is part of a component's import names, so handler/workflow modules
+compiled against ≤ 0.7.0 fail to instantiate on a 0.8.0 engine (publicly a
+generic 500; the real reason in the engine log). Rebuild with the 0.8.0 wit,
+re-upload (new content hash), re-bind. Solver binaries are unaffected — the
+judge's world is import-free.
+
 v3.3 closes the remaining unbounded dimensions. `--max-fn-concurrent` caps
 concurrently *executing* sandboxes process-wide (503 beyond it — honest
 backpressure; asset serving takes no execution slot, so a hosted app's

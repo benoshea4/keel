@@ -209,6 +209,28 @@ CREATE TABLE IF NOT EXISTS assets (
     PRIMARY KEY (app, path)
 );
 
+-- Amendment 2 (v3.5): per-ref operator config (A6) and durable function KV
+-- (A7). Both keyed by the (kind, ref) identity the ledger/logs/limits use.
+-- Caps live in function.rs (the host impl); lifecycle: unbinding a ref does
+-- NOT cascade either table — config is operator intent, kv is guest state;
+-- explicit removal via DELETE /api/config and DELETE /api/kv.
+CREATE TABLE IF NOT EXISTS fn_config (
+    kind       TEXT NOT NULL,               -- 'function' | 'app'
+    ref        TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, ref, name)
+);
+CREATE TABLE IF NOT EXISTS fn_kv (
+    kind       TEXT NOT NULL,
+    ref        TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      BLOB NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, ref, key)
+);
+
 -- Amendment 1 (A2): captured platform-api log lines from function/app runs,
 -- batch-written after each run with the ledger rowid that produced them.
 -- Host-side caps (256 lines/run, 2048 B/line, last 2000 rows per ref) live in
@@ -1388,6 +1410,106 @@ pub fn get_asset(c: &Connection, app: &str, path: &str) -> Result<Option<AssetRo
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
     .optional()?)
+}
+
+// --- Amendment 2 (v3.5): fn_config (A6) + fn_kv (A7) ------------------------
+
+pub fn upsert_config(c: &Connection, kind: &str, refname: &str, name: &str, value: &str) -> Result<()> {
+    c.execute(
+        "INSERT INTO fn_config (kind, ref, name, value, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(kind, ref, name) DO UPDATE SET value = excluded.value",
+        rusqlite::params![kind, refname, name, value, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn get_config(c: &Connection, kind: &str, refname: &str, name: &str) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT value FROM fn_config WHERE kind = ?1 AND ref = ?2 AND name = ?3",
+        rusqlite::params![kind, refname, name],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// Names only — values never leave through a listing (A6).
+pub fn list_config_names(c: &Connection, kind: &str, refname: &str) -> Result<Vec<String>> {
+    let mut stmt = c.prepare(
+        "SELECT name FROM fn_config WHERE kind = ?1 AND ref = ?2 ORDER BY name",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![kind, refname], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn count_config(c: &Connection, kind: &str, refname: &str) -> Result<i64> {
+    Ok(c.query_row(
+        "SELECT COUNT(*) FROM fn_config WHERE kind = ?1 AND ref = ?2",
+        rusqlite::params![kind, refname],
+        |r| r.get(0),
+    )?)
+}
+
+pub fn delete_config(c: &Connection, kind: &str, refname: &str, name: &str) -> Result<bool> {
+    Ok(c.execute(
+        "DELETE FROM fn_config WHERE kind = ?1 AND ref = ?2 AND name = ?3",
+        rusqlite::params![kind, refname, name],
+    )? > 0)
+}
+
+pub fn kv_get(c: &Connection, kind: &str, refname: &str, key: &str) -> Result<Option<Vec<u8>>> {
+    Ok(c.query_row(
+        "SELECT value FROM fn_kv WHERE kind = ?1 AND ref = ?2 AND key = ?3",
+        rusqlite::params![kind, refname, key],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// (key count, total value bytes) for the ref — the A7 cap inputs. One
+/// indexed aggregate; the PK prefix (kind, ref) serves it.
+pub fn kv_usage(c: &Connection, kind: &str, refname: &str) -> Result<(i64, i64)> {
+    Ok(c.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(value)), 0) FROM fn_kv
+         WHERE kind = ?1 AND ref = ?2",
+        rusqlite::params![kind, refname],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// A7: the durability contract is THIS commit — autocommit means the row is
+/// on disk before this function (and therefore the host call) returns.
+pub fn kv_set(c: &Connection, kind: &str, refname: &str, key: &str, value: &[u8]) -> Result<()> {
+    c.execute(
+        "INSERT INTO fn_kv (kind, ref, key, value, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(kind, ref, key) DO UPDATE SET value = excluded.value,
+             updated_at = excluded.updated_at",
+        rusqlite::params![kind, refname, key, value, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn kv_delete(c: &Connection, kind: &str, refname: &str, key: &str) -> Result<()> {
+    c.execute(
+        "DELETE FROM fn_kv WHERE kind = ?1 AND ref = ?2 AND key = ?3",
+        rusqlite::params![kind, refname, key],
+    )?;
+    Ok(())
+}
+
+/// Keys only, same reasoning as config names (guest state isn't for browsing).
+pub fn kv_keys(c: &Connection, kind: &str, refname: &str) -> Result<Vec<String>> {
+    let mut stmt =
+        c.prepare("SELECT key FROM fn_kv WHERE kind = ?1 AND ref = ?2 ORDER BY key")?;
+    let rows = stmt.query_map(rusqlite::params![kind, refname], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The whole ref's store — the control plane's "reset my function" button.
+pub fn kv_wipe(c: &Connection, kind: &str, refname: &str) -> Result<usize> {
+    Ok(c.execute(
+        "DELETE FROM fn_kv WHERE kind = ?1 AND ref = ?2",
+        rusqlite::params![kind, refname],
+    )?)
 }
 
 /// v3.4 (R.2) — delete an app AND its assets in one transaction (routes have

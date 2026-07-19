@@ -217,7 +217,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/platform-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -234,7 +234,7 @@ pub mod keel {
             pub fn now_ms() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/platform-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "now-ms"]
                         fn wit_import0() -> i64;
@@ -252,7 +252,7 @@ pub mod keel {
             pub fn random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/platform-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "random-u64"]
                         fn wit_import0() -> i64;
@@ -292,7 +292,7 @@ pub mod keel {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/platform-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "start-workflow"]
                         fn wit_import3(
@@ -380,7 +380,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/platform-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "get-workflow"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -431,6 +431,215 @@ pub mod keel {
                         _ => _rt::invalid_enum_discriminant(),
                     };
                     result10
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// v3.5 (Amendment 2, A6) — operator-set config for THIS ref (the bound
+            /// route prefix or app name). none = not set. Values are never echoed by
+            /// the control plane; what a guest does with its own key is its choice.
+            pub fn config_get(name: &str) -> Option<_rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = name;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
+                    unsafe extern "C" {
+                        #[link_name = "config-get"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(_: *mut u8, _: usize, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import2(ptr0.cast_mut(), len0, ptr1) };
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result7 = match l3 {
+                        0 => None,
+                        1 => {
+                            let e = {
+                                let l4 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l5 = *ptr1
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                let bytes6 = _rt::Vec::from_raw_parts(
+                                    l4.cast(),
+                                    len6,
+                                    len6,
+                                );
+                                _rt::string_lift(bytes6)
+                            };
+                            Some(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result7
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// v3.5 (A7) — durable per-ref KV. none = key absent. Bytes, not strings.
+            pub fn kv_get(key: &str) -> Option<_rt::Vec<u8>> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = key;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
+                    unsafe extern "C" {
+                        #[link_name = "kv-get"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(_: *mut u8, _: usize, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import2(ptr0.cast_mut(), len0, ptr1) };
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result7 = match l3 {
+                        0 => None,
+                        1 => {
+                            let e = {
+                                let l4 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l5 = *ptr1
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                _rt::Vec::from_raw_parts(l4.cast(), len6, len6)
+                            };
+                            Some(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result7
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// v3.5 (A7) — returns ONLY after the row commits (kill -9 after a
+            /// returned set never loses it). err names the violated cap (key ≤ 256 B,
+            /// value ≤ 64 KiB, ≤ 1024 keys/ref, ≤ 8 MiB total/ref). Atomic per call
+            /// and no more: concurrent read-modify-writes race — atomic sequences are
+            /// what workflows are for.
+            pub fn kv_set(key: &str, value: &[u8]) -> Result<(), _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = key;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let vec1 = value;
+                    let ptr1 = vec1.as_ptr().cast::<u8>();
+                    let len1 = vec1.len();
+                    let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
+                    unsafe extern "C" {
+                        #[link_name = "kv-set"]
+                        fn wit_import3(
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        );
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import3(
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe {
+                        wit_import3(ptr0.cast_mut(), len0, ptr1.cast_mut(), len1, ptr2)
+                    };
+                    let l4 = i32::from(*ptr2.add(0).cast::<u8>());
+                    let result8 = match l4 {
+                        0 => {
+                            let e = ();
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l5 = *ptr2
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l6 = *ptr2
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len7 = l6;
+                                let bytes7 = _rt::Vec::from_raw_parts(
+                                    l5.cast(),
+                                    len7,
+                                    len7,
+                                );
+                                _rt::string_lift(bytes7)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result8
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// v3.5 (A7) — absent key is fine (idempotent).
+            pub fn kv_delete(key: &str) -> () {
+                unsafe {
+                    let vec0 = key;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "keel:workflow/platform-api@0.8.0")]
+                    unsafe extern "C" {
+                        #[link_name = "kv-delete"]
+                        fn wit_import1(_: *mut u8, _: usize);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8, _: usize) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0.cast_mut(), len0) };
                 }
             }
         }
@@ -559,22 +768,24 @@ macro_rules! __export_handler_impl {
 pub(crate) use __export_handler_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.7.0:handler:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.8.0:handler:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 463] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd1\x02\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 576] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xc2\x03\x01A\x02\x01\
 A\x0b\x01o\x02ss\x01p\0\x01p}\x01r\x05\x06methods\x04paths\x05querys\x07headers\x01\
 \x04body\x02\x03\0\x0chttp-request\x03\0\x03\x01r\x03\x06status{\x07headers\x01\x04\
-body\x02\x03\0\x0dhttp-response\x03\0\x05\x01B\x0a\x01@\x01\x03msgs\x01\0\x04\0\x03\
+body\x02\x03\0\x0dhttp-response\x03\0\x05\x01B\x16\x01@\x01\x03msgs\x01\0\x04\0\x03\
 log\x01\0\x01@\0\0w\x04\0\x06now-ms\x01\x01\x04\0\x0arandom-u64\x01\x01\x01j\x01\
 s\x01s\x01@\x02\x0bmodule-hashs\x05inputs\0\x02\x04\0\x0estart-workflow\x01\x03\x01\
-@\x01\x02ids\0\x02\x04\0\x0cget-workflow\x01\x04\x03\0\x20keel:workflow/platform\
--api@0.7.0\x05\x07\x01@\x01\x03req\x04\0\x06\x04\0\x06handle\x01\x08\x04\0\x1bke\
-el:workflow/handler@0.7.0\x04\0\x0b\x0d\x01\0\x07handler\x03\0\0\0G\x09producers\
-\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41\
-.0";
+@\x01\x02ids\0\x02\x04\0\x0cget-workflow\x01\x04\x01ks\x01@\x01\x04names\0\x05\x04\
+\0\x0aconfig-get\x01\x06\x01p}\x01k\x07\x01@\x01\x03keys\0\x08\x04\0\x06kv-get\x01\
+\x09\x01j\0\x01s\x01@\x02\x03keys\x05value\x07\0\x0a\x04\0\x06kv-set\x01\x0b\x01\
+@\x01\x03keys\x01\0\x04\0\x09kv-delete\x01\x0c\x03\0\x20keel:workflow/platform-a\
+pi@0.8.0\x05\x07\x01@\x01\x03req\x04\0\x06\x04\0\x06handle\x01\x08\x04\0\x1bkeel\
+:workflow/handler@0.8.0\x04\0\x0b\x0d\x01\0\x07handler\x03\0\0\0G\x09producers\x01\
+\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

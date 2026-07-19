@@ -83,6 +83,8 @@ jobs:
         run: ./scripts/accept_harden.sh
       - name: Polish — ETag/304, API+CLI symmetry, favicon, percentiles (v3.4)
         run: ./scripts/accept_polish.sh
+      - name: Amendment 2 — function config + durable kv, WIT 0.8.0 (v3.5)
+        run: ./scripts/accept_functions2.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

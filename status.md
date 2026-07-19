@@ -52,6 +52,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_cli.sh                             # must print CLI PASS (client verbs, v3.2)
 ./scripts/accept_harden.sh                          # must print HARDEN PASS (caps/sanitized faults/timeouts, v3.3)
 ./scripts/accept_polish.sh                          # must print POLISH PASS (ETag/CLI symmetry/favicon/percentiles, v3.4)
+./scripts/accept_functions2.sh                      # must print FUNCTIONS2 PASS (config + durable kv, WIT 0.8.0, v3.5)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -1117,6 +1118,45 @@ R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
    Gate accept_functions2.sh: config visible to the guest / absent →
    none / values never in list responses or logs; kv survives restart;
    caps enforced with honest errors; app backends get both.
+
+   V3.5 RECORD (2026-07-19): BUILT AND SHIPPED per SPEC-AMENDMENT-2.md
+   (authored first, in-repo — A6 config, A7 kv, A8 the 0.8.0 rebuild
+   contract, A9 acceptance). Deltas and decisions:
+   - The amendment ADDED kv-delete beyond the plan's get/set — a store you
+     can't delete from fills its caps forever; and it names the atomicity
+     line out loud: per-call only, no CAS (kv-cas listed as future; atomic
+     sequences are what workflows are for).
+   - fn_config + fn_kv tables keyed by the SAME (kind, ref) identity as
+     ledger/logs/limits; unbinding cascades NEITHER (config = operator
+     intent, kv = guest state); explicit removal via DELETE /api/config
+     and DELETE /api/kv (the "reset my function" button). Retention flags
+     deliberately do not touch kv (state, not history).
+   - FnCtx gained kind/refname; host impls: config-get degrades db errors
+     to `none` (the guest surface has no error case, the operator log gets
+     the truth); kv-set door-checks key ≤256 B / value ≤64 KiB then runs
+     the cap check + upsert under ONE IMMEDIATE txn (angry-review catch:
+     check-then-insert would over-admit the per-ref caps of 1024 keys /
+     8 MiB under concurrency; commit is the durability point, still before
+     the call returns).
+   - Control plane: POST/GET/DELETE /api/config (names-only listing —
+     values NEVER echoed), GET/DELETE /api/kv (keys-only; wipe). Token-
+     gated, /api/logs param style.
+   - Fixture guests/kvcfg-fn (world handler): /cfg /count /reset /big —
+     each new call observable through plain HTTP.
+   - accept_functions2.sh (gate 23, in CI): ref-scoped config with a leak
+     check on the listing + door-check 400s; counter 1,2,3 → kill -9 → 4
+     (A7 durability); the SAME module at a second prefix counts from 1
+     and an app backend counts from 1 (ref-scoped, not module-scoped,
+     across kinds); config survives restart; /reset; the over-cap err
+     names 65536; keys-only /api/kv then wipe → 1. Ran 3× from clean
+     (incl. post-txn-fix).
+   - A8 proven the strong way: the ENTIRE 23-gate suite re-ran green under
+     0.8.0 — every guest rebuilt in its own gate, zero source changes
+     outside the new fixture. Solver world untouched (import-free binaries
+     keep judging). Unit tests 53 (kv roundtrip+caps via the real Host
+     impl, config ref-scoping incl. cross-kind).
+   - One clippy catch: the api.rs insert initially split upload_assets
+     from its doc comment (empty-line-after-doc-comment) — moved intact.
 
    v4.0 "the ecosystem release" — SPEC-AMENDMENT-3.md: wasi:http/proxy
    compatibility (P-IDEA-1) + wasi:keyvalue (P-IDEA-2's ecosystem half).

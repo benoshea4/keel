@@ -242,7 +242,7 @@ pub mod keel {
                     };
                     let ptr8 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "http-request"]
                         fn wit_import9(
@@ -417,7 +417,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "secret"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -491,7 +491,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "http-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -549,7 +549,7 @@ pub mod keel {
             pub fn sleep_ms(ms: u64) -> () {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "sleep-ms"]
                         fn wit_import0(_: i64);
@@ -566,7 +566,7 @@ pub mod keel {
             pub fn now_ms() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "now-ms"]
                         fn wit_import0() -> i64;
@@ -584,7 +584,7 @@ pub mod keel {
             pub fn random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "random-u64"]
                         fn wit_import0() -> i64;
@@ -618,7 +618,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "await-event"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -650,7 +650,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "checkpoint"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -675,7 +675,7 @@ pub mod keel {
                     let ptr1 = vec1.as_ptr().cast::<u8>();
                     let len1 = vec1.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-set"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8, _: usize);
@@ -712,7 +712,7 @@ pub mod keel {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -784,7 +784,7 @@ pub mod keel {
                     let len2 = vec2.len();
                     let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "provider-call"]
                         fn wit_import4(
@@ -873,7 +873,7 @@ pub mod keel {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "keel:workflow/host-api@0.7.0")]
+                    #[link(wasm_import_module = "keel:workflow/host-api@0.8.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: *mut u8, _: usize);
@@ -1034,7 +1034,7 @@ macro_rules! __export_workflow_impl {
 pub(crate) use __export_workflow_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.7.0:workflow:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:keel:workflow@0.8.0:workflow:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
@@ -1050,9 +1050,9 @@ sleep-ms\x01\x0a\x01@\0\0w\x04\0\x06now-ms\x01\x0b\x04\0\x0arandom-u64\x01\x0b\x
 \x04\0\x0acheckpoint\x01\x0e\x01@\x02\x03keys\x05values\x01\0\x04\0\x06kv-set\x01\
 \x0f\x01@\x01\x03keys\0\x04\x04\0\x06kv-get\x01\x10\x01@\x03\x04names\x04kinds\x07\
 requests\0\x07\x04\0\x0dprovider-call\x01\x11\x01@\x01\x03msgs\x01\0\x04\0\x03lo\
-g\x01\x12\x03\0\x1ckeel:workflow/host-api@0.7.0\x05\0\x01j\x01s\x01s\x01@\x01\x05\
+g\x01\x12\x03\0\x1ckeel:workflow/host-api@0.8.0\x05\0\x01j\x01s\x01s\x01@\x01\x05\
 inputs\0\x01\x04\0\x03run\x01\x02\x01p}\x01@\x01\x05state\x03\0\x01\x04\0\x06res\
-ume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.7.0\x04\0\x0b\x0e\x01\0\x08workflo\
+ume\x01\x04\x04\0\x1ckeel:workflow/workflow@0.8.0\x04\0\x0b\x0e\x01\0\x08workflo\
 w\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10\
 wit-bindgen-rust\x060.41.0";
 #[inline(never)]

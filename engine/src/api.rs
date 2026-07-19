@@ -1160,10 +1160,105 @@ pub async fn create_app(
     ))
 }
 
-/// POST /api/apps/{name}/assets — body = a zip of the app's dist/. Zip-slip
-/// entries (`..` or absolute paths) are a 400 and nothing is stored from the
-/// bundle before them; directories are skipped; `.wasm`/`.js` content types
-/// are forced (browsers refuse WASM served with the wrong type).
+// --- Amendment 2 (v3.5): per-ref config (A6) + kv control plane (A7) --------
+
+/// Shared param validation for the config/kv endpoints (the /api/logs style).
+fn kind_ref(q: &HashMap<String, String>) -> Result<(String, String), ApiErr> {
+    let kind = q.get("kind").cloned().unwrap_or_else(|| "function".into());
+    if kind != "function" && kind != "app" {
+        return Err(bad("kind must be 'function' or 'app'"));
+    }
+    let refname = q.get("ref").cloned().ok_or_else(|| bad("missing param: ref"))?;
+    Ok((kind, refname))
+}
+
+/// POST /api/config {"kind","ref","name","value"} → 201 (upsert). A6 door
+/// checks live HERE — the guest surface (config-get) has no error case.
+pub async fn set_config(
+    State(shared): State<Arc<EngineShared>>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode, ApiErr> {
+    let get = |k: &str| -> Result<String, ApiErr> {
+        body.get(k)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| bad(format!("missing field: {k}")))
+    };
+    let (kind, refname, name, value) = (get("kind")?, get("ref")?, get("name")?, get("value")?);
+    if kind != "function" && kind != "app" {
+        return Err(bad("kind must be 'function' or 'app'"));
+    }
+    if name.is_empty()
+        || name.len() > 64
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(bad("name must be [A-Za-z0-9_-]{1,64}"));
+    }
+    if value.len() > 4096 {
+        return Err(bad("value exceeds 4096 bytes"));
+    }
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    // ≤ 64 entries per ref; overwrites of an existing name always pass.
+    if db::get_config(&conn, &kind, &refname, &name).map_err(internal)?.is_none()
+        && db::count_config(&conn, &kind, &refname).map_err(internal)? >= 64
+    {
+        return Err(bad("ref already holds 64 config entries"));
+    }
+    db::upsert_config(&conn, &kind, &refname, &name, &value).map_err(internal)?;
+    Ok(StatusCode::CREATED)
+}
+
+/// GET /api/config?kind=&ref= → {"names":[...]} — NAMES ONLY, never values
+/// (A6: the engine-side guarantee is names-out-only).
+pub async fn get_config_names(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiErr> {
+    let (kind, refname) = kind_ref(&q)?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let names = db::list_config_names(&conn, &kind, &refname).map_err(internal)?;
+    Ok(Json(json!({ "names": names })))
+}
+
+/// DELETE /api/config?kind=&ref=&name= → 204 / 404.
+pub async fn delete_config(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<StatusCode, ApiErr> {
+    let (kind, refname) = kind_ref(&q)?;
+    let name = q.get("name").ok_or_else(|| bad("missing param: name"))?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::delete_config(&conn, &kind, &refname, name).map_err(internal)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "no such config entry".to_string()))
+    }
+}
+
+/// GET /api/kv?kind=&ref= → {"keys":[...]} — keys only (guest state is not
+/// operator browsing material, A7).
+pub async fn get_kv_keys(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiErr> {
+    let (kind, refname) = kind_ref(&q)?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let keys = db::kv_keys(&conn, &kind, &refname).map_err(internal)?;
+    Ok(Json(json!({ "keys": keys })))
+}
+
+/// DELETE /api/kv?kind=&ref= → 204 — the whole ref's store ("reset my
+/// function"). Idempotent: wiping an empty store is still a 204.
+pub async fn wipe_kv(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<StatusCode, ApiErr> {
+    let (kind, refname) = kind_ref(&q)?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    db::kv_wipe(&conn, &kind, &refname).map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// GET /api/apps — v3.4 (R.2): the OTHER API hole `keel ls` surfaced — apps
 /// could be created and served but never listed except by the HTML page.
 pub async fn list_apps(State(shared): State<Arc<EngineShared>>) -> Result<Json<Value>, ApiErr> {
@@ -1197,6 +1292,10 @@ pub async fn delete_app(
     }
 }
 
+/// POST /api/apps/{name}/assets — body = a zip of the app's dist/. Zip-slip
+/// entries (`..` or absolute paths) are a 400 and nothing is stored from the
+/// bundle before them; directories are skipped; `.wasm`/`.js` content types
+/// are forced (browsers refuse WASM served with the wrong type).
 pub async fn upload_assets(
     State(shared): State<Arc<EngineShared>>,
     Path(name): Path<String>,

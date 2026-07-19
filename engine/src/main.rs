@@ -642,6 +642,15 @@ async fn serve(
         .route("/partials/playground/{slug}", get(ui::submissions_partial))
         .route("/usage", get(ui::usage_page))
         .route("/partials/usage", get(ui::usage_partial))
+        // Amendment 2 (v3.5) — per-ref config + kv control plane (values and
+        // guest state never listed; names/keys only).
+        .route(
+            "/api/config",
+            post(api::set_config)
+                .get(api::get_config_names)
+                .delete(api::delete_config),
+        )
+        .route("/api/kv", get(api::get_kv_keys).delete(api::wipe_kv))
         // Amendment 1 (A2) — captured function/app logs: JSON read API + a
         // drill-down page (linked from /routes and /apps rows, not a nav tab).
         .route("/api/logs", get(api::get_logs))

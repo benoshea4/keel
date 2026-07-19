@@ -34,6 +34,13 @@ use keel::workflow::platform_api;
 const MAX_LOG_LINES: usize = 256;
 const MAX_LINE_BYTES: usize = 2048;
 
+/// Amendment 2 (A7) — the kv caps, public-plane discipline: a tokenless
+/// caller must not be able to grow the database. Named in every err.
+const KV_KEY_MAX: usize = 256;
+const KV_VALUE_MAX: usize = 64 * 1024;
+const KV_MAX_KEYS: i64 = 1024;
+const KV_MAX_BYTES: i64 = 8 * 1024 * 1024;
+
 /// Truncate to at most `max` bytes without splitting a UTF-8 char.
 fn truncate_line(mut s: String, max: usize) -> String {
     if s.len() > max {
@@ -58,6 +65,10 @@ pub struct FnCtx {
     pub logs: Vec<String>,
     /// Lines past MAX_LOG_LINES: counted, dropped, one marker line at the end.
     pub logs_dropped: u64,
+    /// Amendment 2 — the invocation's ref identity ('function'|'app' + the
+    /// route prefix or app name): config-get and the kv calls scope to it.
+    pub kind: String,
+    pub refname: String,
 }
 
 impl platform_api::Host for FnCtx {
@@ -105,6 +116,64 @@ impl platform_api::Host for FnCtx {
             Ok(Some(wf)) => Ok(db::workflow_json(&wf).to_string()),
             Ok(None) => Err(format!("unknown workflow id {id}")),
             Err(e) => Err(format!("engine error: {e:#}")),
+        }
+    }
+
+    // --- Amendment 2 (v3.5): config + durable kv, all scoped (kind, ref) ----
+
+    fn config_get(&mut self, name: String) -> Option<String> {
+        // A db error here degrades to `none` — the guest surface has no error
+        // case by design (A6); the operator's log gets the truth.
+        db::get_config(&self.db, &self.kind, &self.refname, &name).unwrap_or_else(|e| {
+            tracing::error!("config-get({name}) for {} {}: {e:#}", self.kind, self.refname);
+            None
+        })
+    }
+
+    fn kv_get(&mut self, key: String) -> Option<Vec<u8>> {
+        db::kv_get(&self.db, &self.kind, &self.refname, &key).unwrap_or_else(|e| {
+            tracing::error!("kv-get({key}) for {} {}: {e:#}", self.kind, self.refname);
+            None
+        })
+    }
+
+    fn kv_set(&mut self, key: String, value: Vec<u8>) -> Result<(), String> {
+        if key.len() > KV_KEY_MAX {
+            return Err(format!("key exceeds {KV_KEY_MAX} bytes"));
+        }
+        if value.len() > KV_VALUE_MAX {
+            return Err(format!("value exceeds {KV_VALUE_MAX} bytes"));
+        }
+        // Cap check + write under ONE IMMEDIATE transaction: concurrent
+        // writers to the same ref serialize here, so the per-ref totals can't
+        // be over-admitted by a race (the caps are the public-plane wall —
+        // approximately enforced is not enforced). Commit is the durability
+        // point, still before the call returns (A7).
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("engine error: {e:#}"))?;
+        let (keys, bytes) =
+            db::kv_usage(&tx, &self.kind, &self.refname).map_err(|e| format!("engine error: {e:#}"))?;
+        // Overwrites of an existing key must not trip the key-count cap; the
+        // byte cap counts the old value until the upsert lands — safely
+        // conservative.
+        let existing = db::kv_get(&tx, &self.kind, &self.refname, &key)
+            .map_err(|e| format!("engine error: {e:#}"))?;
+        if existing.is_none() && keys >= KV_MAX_KEYS {
+            return Err(format!("ref already holds {KV_MAX_KEYS} keys"));
+        }
+        if bytes + value.len() as i64 > KV_MAX_BYTES {
+            return Err(format!("ref would exceed {KV_MAX_BYTES} total value bytes"));
+        }
+        db::kv_set(&tx, &self.kind, &self.refname, &key, &value)
+            .map_err(|e| format!("engine error: {e:#}"))?;
+        tx.commit().map_err(|e| format!("engine error: {e:#}"))
+    }
+
+    fn kv_delete(&mut self, key: String) {
+        if let Err(e) = db::kv_delete(&self.db, &self.kind, &self.refname, &key) {
+            tracing::error!("kv-delete({key}) for {} {}: {e:#}", self.kind, self.refname);
         }
     }
 }
@@ -234,6 +303,8 @@ pub fn invoke_handler(
         },
         logs: Vec::new(),
         logs_dropped: 0,
+        kind: kind.to_string(),
+        refname: refname.to_string(),
     };
     let mut store = Store::new(&shared.engine, ctx);
     store.limiter(|c| &mut c.mem_limiter);
@@ -381,6 +452,63 @@ mod tests {
             Admission::Admitted(_g) => {}
             Admission::Limited { .. } => panic!("aged-out window must admit"),
         }
+    }
+
+    /// v3.5 (A6/A7): the host surface itself, driven as the guest would.
+    fn fn_ctx(name: &str, kind: &str, refname: &str) -> super::FnCtx {
+        let shared = Arc::new(crate::runner::testutil::shared(name, 8));
+        let conn = db::open_conn(&shared.db_path).expect("open scratch db");
+        super::FnCtx {
+            db: conn,
+            shared,
+            mem_limiter: crate::sandbox::MemLimiter {
+                limit: 1024 * 1024,
+                peak: 0,
+                denied: false,
+            },
+            logs: Vec::new(),
+            logs_dropped: 0,
+            kind: kind.to_string(),
+            refname: refname.to_string(),
+        }
+    }
+
+    #[test]
+    fn kv_roundtrip_delete_and_value_cap() {
+        use super::platform_api::Host as _;
+        let mut ctx = fn_ctx("kv-host", "function", "/fn/t");
+        assert_eq!(ctx.kv_get("k".into()), None);
+        ctx.kv_set("k".into(), b"v1".to_vec()).unwrap();
+        assert_eq!(ctx.kv_get("k".into()), Some(b"v1".to_vec()));
+        ctx.kv_set("k".into(), b"v2".to_vec()).unwrap(); // overwrite, not a new key
+        assert_eq!(ctx.kv_get("k".into()), Some(b"v2".to_vec()));
+        let err = ctx
+            .kv_set("big".into(), vec![b'x'; super::KV_VALUE_MAX + 1])
+            .unwrap_err();
+        assert!(err.contains(&super::KV_VALUE_MAX.to_string()), "{err}");
+        let err = ctx
+            .kv_set("x".repeat(super::KV_KEY_MAX + 1), b"v".to_vec())
+            .unwrap_err();
+        assert!(err.contains(&super::KV_KEY_MAX.to_string()), "{err}");
+        ctx.kv_delete("k".into());
+        assert_eq!(ctx.kv_get("k".into()), None);
+        ctx.kv_delete("k".into()); // idempotent
+    }
+
+    #[test]
+    fn config_get_is_ref_scoped() {
+        use super::platform_api::Host as _;
+        let mut ctx = fn_ctx("cfg-host", "function", "/fn/a");
+        db::upsert_config(&ctx.db, "function", "/fn/a", "API_KEY", "sk-123").unwrap();
+        db::upsert_config(&ctx.db, "function", "/fn/OTHER", "API_KEY", "sk-999").unwrap();
+        assert_eq!(ctx.config_get("API_KEY".into()), Some("sk-123".into()));
+        assert_eq!(ctx.config_get("MISSING".into()), None);
+        let mut other = fn_ctx("cfg-host2", "app", "a");
+        assert_eq!(
+            other.config_get("API_KEY".into()),
+            None,
+            "kind 'app' must not see kind 'function' config"
+        );
     }
 
     #[test]
