@@ -1017,6 +1017,101 @@ Q. **v3.3 "harden" — P-FIX-1..5 built and shipped (2026-07-19).** The user's
    (copy on cold start, serialized cold compiles). No code defects
    survived to commit.
 
+   V3.3 SHIPPED (2026-07-19): commit d36bf8ece1be448ccaee95ce4a14366f213a8e03
+   pushed → CI green (both jobs, all 21 gates) → release v3.3 created with
+   --target on that exact SHA + hand-written notes → release.yml success →
+   6 assets (linux x86_64/arm64 + macOS arm64 tarballs, each with .sha256)
+   verified via the releases LIST endpoint. Suite at ship: 21 gates /
+   44 unit tests / clippy --release -D warnings. The user's demo engine on
+   :8080 was killed for the suite runs; restart on the new binary if
+   wanted (nohup target/release/keel serve --db demo.db).
+
+R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
+   §P stands as written (append-only; its P-FIX-1..5 are ticked and §Q is
+   their record). This section refines the REMAINING shelf with what the
+   v3.3 build taught. Everything below stays demand-driven: nothing starts
+   without the user's word.
+
+   v3.4 "polish" — P-FIX-6..9 + P-IDEA-6, one gate (accept_polish.sh),
+   no WIT change, additive schema only:
+   - [ ] R.1 (P-FIX-6) asset caching: store sha256 per asset at upload
+     (assets table gains an `etag` column via ensure_column — the
+     schedules.cron retrofit precedent); serve_asset sends ETag and
+     honors If-None-Match → 304 empty body; Cache-Control splits:
+     content-hashed filenames (trunk's `-<hex>.` pattern) get
+     `max-age=31536000, immutable`, index.html KEEPS no-store (it is the
+     upgrade lever — never cache the entry point). Gate: GET carries
+     ETag → conditional GET 304s → re-upload changes the ETag → 200
+     again → index.html stays no-store. Apps go ~1 MB/load → ~1 KB.
+   - [ ] R.2 (P-FIX-7) CLI symmetry + the missing API: FIRST the API
+     hole — DELETE /api/apps/{name} (app row + assets cascaded in ONE
+     txn; 404 honest; routes already have DELETE, apps have none).
+     Then the verbs, thin clients per A4: `keel ls` (routes + apps +
+     schedules, one screen), `keel unbind <prefix>`, `keel apps rm
+     <name>`, and `keel run --timeout <secs>` (exit 2 on deadline —
+     scripts need a bound; today a wedged workflow wedges the CLI).
+   - [ ] R.3 (P-FIX-8) favicon: one embedded file served like
+     htmx.min.js (build.rs-asserted), route allowlisted in auth like
+     /assets/*. Kills a 404 per page view.
+   - [ ] R.4 (P-FIX-9) admit() unit tests — UNBLOCKED by v3.3: §P hedged
+     "if EngineShared construction is too heavy, extract the core"; the
+     v3.3 runner.rs tests settled it (test_shared builds a REAL
+     EngineShared on a scratch db, cheaply). Reuse that helper: seed
+     invocations rows at the window edge, assert recent+inflight vs
+     limit boundaries, AdmitGuard Drop releases the slot, Limited's
+     retry_after_ms derives from the oldest in-window row (None → 1000).
+   - [ ] R.5 (P-IDEA-6) latency percentiles: p50/p95/p99 per ref from
+     invocations.duration_ms — small N per ref, compute in SQL
+     (ORDER BY duration_ms + LIMIT/OFFSET index math; no dependency,
+     no histogram buckets to mis-size) — exposed as
+     keel_fn_duration_ms{ref="...",quantile="..."} gauges; /usage gains
+     three columns. Metrics first; sparklines only if asked.
+   - Optional while in there (only if trivial): keel_judge_queue depth
+     gauge — v3.3 made the queue real, a gauge makes it visible.
+
+   v3.5 "functions grow up" — SPEC-AMENDMENT-2.md FIRST (the Amendment 1
+   in-repo discipline), then code. ONE WIT bump (0.7.0 → 0.8.0 — the
+   one-bump-per-stage rule is why config and kv ship TOGETHER, and why
+   they ship BEFORE the wasi work): platform-api gains
+   - config-get(name) -> option<string> (P-IDEA-3): per-route/per-app
+     config set on the control plane, values stored in the db and NEVER
+     echoed by list endpoints (names only — the secrets redaction
+     posture); the API-key unlock, i.e. the last thing between /fn and
+     real external integrations.
+   - kv-get(key) -> option<list<u8>> / kv-set(key, value) (P-IDEA-2's
+     platform-api half): durable per-ref state in a new fn_kv table
+     keyed by the same (kind, ref) identity the ledger and fn_logs use;
+     hard caps per ref (key count + total bytes) so a public listener
+     cannot grow the db — the fn_logs bounding precedent. Sessions,
+     counters, caches — real apps without reaching for a workflow.
+   Additive WIT: existing guests rebuild only to ADOPT the imports.
+   Gate accept_functions2.sh: config visible to the guest / absent →
+   none / values never in list responses or logs; kv survives restart;
+   caps enforced with honest errors; app backends get both.
+
+   v4.0 "the ecosystem release" — SPEC-AMENDMENT-3.md: wasi:http/proxy
+   compatibility (P-IDEA-1) + wasi:keyvalue (P-IDEA-2's ecosystem half).
+   Phase-sized, and the spec must settle THE dependency decision up
+   front: adopt wasmtime-wasi + wasmtime-wasi-http for the proxy world's
+   host surface (they are the reference implementation; hand-rolling
+   wasi:io/streams is a losing game) — a deliberate new dependency
+   family, taken in a spec, not mid-code. Dispatcher inspects the
+   uploaded component's exports and drives world handler OR
+   wasi:http/proxy per route; wasi:keyvalue backs onto v3.5's fn_kv
+   table (same caps, same identity). Result: unmodified Spin /
+   componentize-js / JCO output deploys on a one-binary cloud — the
+   single biggest adoption unlock on the board.
+
+   Why this order (founder voice): v3.4 is a day of polish that makes
+   every demo feel professional (304s, favicon, `keel ls`) and closes
+   the audit; v3.5 is SMALL, pure-keel, completes the "real apps" story
+   (state + secrets), and builds machinery v4.0 reuses; v4.0 is the
+   adoption swing and deserves a fresh phase with its dependency
+   decision made deliberately. The rest of the shelf (P-IDEA-4
+   templates, -5 cron→functions, -7 usage export, -8 public playground)
+   stays ranked behind these three; the hosted cloud stays
+   adoption-gated (VISION.md).
+
 ---
 
 ## What exists (file map, all phases)

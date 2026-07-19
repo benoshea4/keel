@@ -44,16 +44,28 @@ definition of done) and runs in CI.
 ## Next
 
 One WIT bump per stage, never two. The micro-cloud extension
-([SPEC-MICROCLOUD.md](SPEC-MICROCLOUD.md)) is COMPLETE — v2.7 → v2.8 → v3.0.
-Everything from here is demand-driven:
+([SPEC-MICROCLOUD.md](SPEC-MICROCLOUD.md)) is COMPLETE — v2.7 → v2.8 → v3.0 —
+and its stretch item "per-route rate limits off the ledger" shipped as v3.1
+(Amendment 1). Everything from here is demand-driven; the refined sequence
+lives in status.md §R:
 
+- **v3.4 "polish"** — ETag/304 asset caching (hash-named files immutable,
+  index.html stays no-store), CLI symmetry (`keel ls` / `unbind` /
+  `apps rm` + the missing `DELETE /api/apps/{name}`, `run --timeout`),
+  embedded favicon, admit() unit tests, latency percentiles from the
+  ledger's `duration_ms`. No WIT change.
+- **v3.5 "functions grow up"** — Amendment 2 (spec first): platform-api
+  0.8.0 adds `config-get` (per-route config/secrets — the API-key unlock)
+  and `kv-get`/`kv-set` (durable per-ref state, hard caps). One WIT bump,
+  pure keel, no new dependencies.
+- **v4.0 "the ecosystem release"** — Amendment 3: `wasi:http/proxy`
+  compatibility mode + `wasi:keyvalue`, host surface via
+  wasmtime-wasi(-http) — unmodified Spin/JCO components deploy on a
+  one-binary cloud. Phase-sized.
 - **host-kv for providers** — durable provider-scoped state (needs a key
   namespacing design; see PROVIDERS.md "Future").
 - **Native streaming replication** — only if a managed cloud gets built;
   Litestream covers off-box replication until then.
-- **Micro-cloud stretch** (SPEC-MICROCLOUD.md "Stretch"): `wasi:http/proxy`
-  compatibility mode, `wasi:keyvalue` host interface, per-route rate limits
-  off the ledger. Spec amendment first, code second.
 
 ### Cloud (unversioned, gated on adoption)
 
