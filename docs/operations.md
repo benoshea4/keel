@@ -73,6 +73,29 @@ plane answer a generic `{"error":"internal error"}` — the full error chain
 lands in the engine log (grep `public-plane`), because tokenless callers
 don't get module hashes, database paths, or compiler output.
 
+## Outbound HTTP (proxy-world grants)
+
+v4.0 lets a `wasi:http/proxy` route or app make real outgoing HTTP, but only
+when bound with `allow_outbound: true` — the default is a clean in-band denial
+(SSRF posture mirrors effectful providers). The grant is visible in every read
+path: `GET /api/routes` and `GET /api/apps` both echo `allow_outbound`, and
+`keel ls` shows it — so a capability inventory of a fleet never misses an
+outbound-capable ref.
+
+An outbound call cannot outlive the invocation's own wall-clock budget. The
+proxy runs synchronously on a blocking thread, so a guest parked in an
+outbound to a slow or hung upstream would otherwise pin its `--max-fn-concurrent`
+permit far past the route's `time_limit_ms` (wasi-http's per-phase timeouts
+default to 600 s and the guest can raise them). The engine bounds the permit
+hold to O(`time_limit_ms`) three ways: each connect / first-byte / between-bytes
+phase is clamped DOWN to the route's `time_limit_ms`; a new outbound is refused
+once the invocation's wall-clock budget is spent (no chaining sub-budget calls);
+and the store's epoch deadline traps the guest at its next wasm boundary once
+wall time exceeds the budget. Net effect: a granted outbound to a dead upstream
+returns in ~`time_limit_ms`, the permit frees, and a flood of hung outbounds at
+the cap clears without wedging the data plane. Size `time_limit_ms` for the
+slowest upstream a route legitimately calls.
+
 ## Secrets
 
 ```bash

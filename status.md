@@ -1656,16 +1656,26 @@ S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
    the S-FIX-1 entry) and gate-proven; (b) accept_hardv41.sh WRITTEN + PASSING
    (scripts/hang_stub.py is its hanging upstream), covering S-FIX-1 / S-FIX-5 /
    S-FIX-8.
-   STILL BEFORE A v4.1 TAG: (c) gate coverage for S-FIX-3 (needs a crafted
-   forged-uncompressed-size zip fixture — python zipfile writes honest headers,
-   so this wants hand-packed bytes) and S-FIX-10 (`keel run --timeout 0` polls
-   once — CLI-loop assertion; low-risk, the reorder is self-evidently correct);
-   (d) the FULL 25-gate suite on an idle machine (accept_hardv41 joins CI after
-   accept_ecosystem); (e) docs/api.md GET /api/apps `allow_outbound` row +
-   operations.md proxy-outbound timeout note; (f) then the ship ritual
-   (CI-verified tag, hand-written notes, 6 assets). Until then this is an
-   in-tree hardening slice, green on build / clippy -D warnings / 54 unit tests
-   / accept_harden + functions2 + polish + ecosystem + hardv41.
+   DONE THE LAUNCH PASS (2026-07-19): (c) gate coverage CLOSED for the last two
+   fixes — accept_hardv41.sh now also exercises S-FIX-3 (a real forged-header
+   zip bomb from scripts/forge_zipbomb.py: python builds a 300 MiB-of-zeros
+   deflate entry, then hand-patches BOTH uncompressed-size fields to 0 — the
+   exact forge the pre-fix pre-check trusted; the gate asserts 400 + zero assets
+   stored + engine healthy, which a pre-fix unbounded read_to_end would fail by
+   STORING it) and S-FIX-10 (`keel run --timeout 0` against the parking approval
+   guest → exit 2 with an OBSERVED status 'running'/'waiting_event', never the
+   pre-fix fabricated 'starting'). Both PASS locally; HARDV41 PASS with all six
+   checks. (d) accept_hardv41 WIRED into ci.yml after accept_ecosystem — the
+   full 25-gate suite is now the CI definition of done (the authoritative
+   idle-machine run, per this repo's "must run somewhere other than one laptop"
+   discipline). (e) docs LANDED — docs/api.md GET+POST /api/apps `allow_outbound`
+   and a new operations.md "Outbound HTTP (proxy-world grants)" section
+   (visibility on every read path + the O(time_limit_ms) permit-hold bound). No
+   Rust changed this pass (scripts + docs + ci only); the tree stays green on
+   clippy --release -D warnings and 58 core unit tests. (f) SHIP RITUAL:
+   merge v4.1-harden → main → CI green on the SHA (all 25 gates) → tag v4.1 on
+   that exact SHA → release.yml → 6 assets verified via the releases LIST
+   endpoint. See §S.4 for the ship record.
 
 ---
 

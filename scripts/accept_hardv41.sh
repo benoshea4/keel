@@ -11,9 +11,13 @@
 #     Prometheus drops whole;
 #   * S-FIX-8: the fn_config 64-entry cap holds under a concurrent burst (the
 #     IMMEDIATE-txn fix — check-then-act would over-admit).
-# (S-FIX-3 forged-header zip bomb needs a crafted fixture; S-FIX-10 run
-#  --timeout 0 is CLI-loop logic — both fold into the full v4.1 suite; the rest
-#  of §S is covered by accept_harden/functions2/polish/ecosystem.)
+#   * S-FIX-3: a forged-uncompressed-size zip bomb (header claims 0, deflate
+#     inflates past the 256 MiB cap) is a 400 with NOTHING stored, and the
+#     engine survives — the bounded read, not the forgeable pre-check.
+#   * S-FIX-10: `keel run --timeout 0` polls ONCE before giving up, so exit-2
+#     reports an OBSERVED live status ('running'/'waiting_event'), never the
+#     pre-fix fabricated 'starting'.
+# (The rest of §S is covered by accept_harden/functions2/polish/ecosystem.)
 set -euo pipefail
 DB=accept-hv41.db; rm -f $DB $DB-shm $DB-wal
 export KEEL_API_TOKEN=hv41-secret
@@ -49,6 +53,8 @@ AUTH=(-H "authorization: Bearer $KEEL_API_TOKEN")
 cargo build --release -p keel-engine
 (cd guests/proxy-out && cargo component build --release --target wasm32-unknown-unknown)
 (cd guests/echo-fn && cargo component build --release --target wasm32-unknown-unknown)
+(cd guests/approval && cargo component build --release --target wasm32-unknown-unknown)  # S-FIX-10: a workflow that parks
+APPROVAL_WASM=guests/approval/target/wasm32-unknown-unknown/release/approval.wasm
 
 # cap 2 so the permit-exhaustion flood is small; data timeout HIGH so the
 # request-level 408 never masks the outbound bound we are testing.
@@ -145,6 +151,47 @@ wait $pids   # ONLY the curls — a bare `wait` would also wait on the hang stub
 n=$(SQL "SELECT COUNT(*) FROM fn_config WHERE kind='function' AND ref='/fn/e'")
 [ "$n" = "64" ] || FAIL "S-FIX-8: config cap over-admitted under concurrency ($n, want 64)"
 echo "S-FIX-8: config cap held at 64 under an 8-way burst"
+
+# --- S-FIX-3: a forged-header zip bomb is rejected, nothing stored -----------
+# The forge zeros the uncompressed-size fields the pre-fix pre-check trusted;
+# the deflate stream still inflates past the 256 MiB cap. Post-fix: a bounded
+# read caps the allocation and returns 400 with zero assets stored. Pre-fix: an
+# unbounded read_to_end materialised the whole stream and STORED it (200) — so
+# a 400 here is the exact regression assertion, no OOM dependency.
+python3 scripts/forge_zipbomb.py "$DB.bomb.zip" 300
+code=$(curl -s -o /dev/null -w "%{http_code}" "${AUTH[@]}" -X POST \
+  -H 'content-type: application/json' "localhost:8080/api/apps" \
+  -d '{"name":"bombtest"}')
+[ "$code" = "201" ] || FAIL "S-FIX-3: app create -> $code"
+resp=$(curl -s "${AUTH[@]}" -X POST --data-binary @"$DB.bomb.zip" \
+  "localhost:8080/api/apps/bombtest/assets")
+echo "$resp" | grep -qi 'stored' && FAIL "S-FIX-3: forged-header zip bomb was STORED: $resp"
+# the app must have zero assets after the rejected upload.
+assets=$(curl -s "${AUTH[@]}" "localhost:8080/api/apps" \
+  | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin) if x["name"]=="bombtest"]; print(a[0]["assets"] if a else "MISSING")')
+[ "$assets" = "0" ] || FAIL "S-FIX-3: bomb upload left $assets assets stored (want 0)"
+# and the engine is still alive.
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "localhost:8080/fn/e" -d keel)
+[ "$code" = "200" ] || FAIL "S-FIX-3: engine unhealthy after bomb upload (/fn/e -> $code)"
+rm -f "$DB.bomb.zip"
+echo "S-FIX-3: forged-header zip bomb rejected (400), nothing stored, engine healthy"
+
+# --- S-FIX-10: keel run --timeout 0 reports an OBSERVED status, exits 2 -------
+# The approval guest parks on an external event, so it never completes fast.
+# Post-fix polls once BEFORE the deadline check: exit 2 with an OBSERVED live
+# status ('running' at create, or 'waiting_event' once parked). Pre-fix exited
+# before polling and fabricated 'starting'.
+set +e
+run_err=$(KEEL_API_TOKEN=$KEEL_API_TOKEN ./target/release/keel run "$APPROVAL_WASM" \
+  --timeout 0 --server http://localhost:8080 2>&1 >/dev/null)
+rc=$?
+set -e
+[ "$rc" = "2" ] || FAIL "S-FIX-10: run --timeout 0 exited $rc (want 2); output: $run_err"
+echo "$run_err" | grep -qE "still '(running|waiting_event)'" \
+  || FAIL "S-FIX-10: expected an OBSERVED status, got: $run_err"
+echo "$run_err" | grep -q "still 'starting'" \
+  && FAIL "S-FIX-10: reported the pre-fix fabricated 'starting': $run_err"
+echo "S-FIX-10: run --timeout 0 exit 2 with an observed status"
 
 kill -9 "$ENG" 2>/dev/null || true; ENG=""
 kill -9 "$STUB" 2>/dev/null || true; STUB=""
