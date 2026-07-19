@@ -98,12 +98,19 @@ bind /fn/out "$H_OUT" '{"allow_outbound": true, "time_limit_ms": 2000}'
 bind /fn/e   "$H_ECHO" '{}'
 
 # --- S-FIX-1: a single hung outbound is bounded, permit frees ----------------
+# The bound has three enforcers (per-phase clamp, budget denial, epoch trap) and
+# which one WINS the ~time_limit_ms race is timing-dependent: the phase clamp
+# surfaces a proxy error body, while the epoch trap ends the invocation as a
+# time-limit-exceeded outcome ({"outcome":"tle"}). BOTH are the invariant we are
+# proving — a bounded permit hold — so the body assertion accepts either. The
+# dt<=8 check is what actually proves the bound; the body just confirms it was a
+# failure, not a successfully proxied response.
 t0=$SECONDS
 body=$(curl -s --max-time 20 "localhost:8080/fn/out/")
 dt=$((SECONDS - t0))
 [ "$dt" -le 8 ] || FAIL "S-FIX-1: hung outbound held for ${dt}s (want <=8 ≈ time_limit_ms; pre-fix ~600s/curl-cap)"
-echo "$body" | grep -qiE 'error|timeout|refused|never resolved' \
-  || FAIL "S-FIX-1: expected a bounded outbound failure, got: '$body'"
+echo "$body" | grep -qiE 'error|timeout|refused|never resolved|"outcome":"tle"' \
+  || FAIL "S-FIX-1: expected a bounded outbound failure (proxy error or tle), got: '$body'"
 code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "localhost:8080/fn/e" -d keel)
 [ "$code" = "200" ] || FAIL "S-FIX-1: permit not freed after hung outbound (/fn/e -> $code)"
 echo "S-FIX-1 single: bounded at ${dt}s, permit freed"
