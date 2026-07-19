@@ -1677,6 +1677,25 @@ S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
    that exact SHA → release.yml → 6 assets verified via the releases LIST
    endpoint. See §S.4 for the ship record.
 
+   S.4 — SHIP RECORD (2026-07-19): **v4.1 SHIPPED.** The launch pass merged
+   fast-forward to main and pushed. The FIRST CI run (SHA 5841924) went RED on
+   the acceptance job — but NOT a regression: the pre-existing S-FIX-1 body
+   assertion in accept_hardv41.sh was too narrow. The permit-hold bound has
+   three race-enforcers (per-phase clamp / budget denial / epoch trap); on the
+   CI machine the EPOCH TRAP won the ~time_limit_ms race, so the hung outbound
+   ended as `{"outcome":"tle"}` instead of the proxy-error string the assertion
+   grepped for (locally the phase clamp won and produced that string). Both are
+   the SAME invariant — a bounded permit hold, already proven by the dt<=8 timing
+   check — so the fix broadened the body check to accept the `tle` outcome too
+   (commit 494a1d7). SECOND CI run (SHA 494a1d7): GREEN, both jobs, all 25 gates.
+   Tag v4.1 cut on that exact CI-verified SHA (verified: `git rev-list -n1 v4.1`
+   == 494a1d7), release created with hand-written notes ("v4.1 — audit +
+   hardening"), release.yml SUCCESS, and all **6 assets** (linux x86_64/arm64 +
+   macOS arm64 tarballs + sha256s) verified present via the `repos/.../releases`
+   LIST endpoint (the by-id/list path, not the flaky by-tag one). §S is now a
+   TAGGED RELEASE, not an in-tree slice. The remaining shelf (the outbound-http
+   hexagonal port, §S H-track + SPEC-AMENDMENT-4.md) stays demand-driven.
+
 ---
 
 ## What exists (file map, current through v4.0)
