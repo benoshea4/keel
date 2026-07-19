@@ -53,6 +53,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_harden.sh                          # must print HARDEN PASS (caps/sanitized faults/timeouts, v3.3)
 ./scripts/accept_polish.sh                          # must print POLISH PASS (ETag/CLI symmetry/favicon/percentiles, v3.4)
 ./scripts/accept_functions2.sh                      # must print FUNCTIONS2 PASS (config + durable kv, WIT 0.8.0, v3.5)
+./scripts/accept_ecosystem.sh                       # must print ECOSYSTEM PASS (wasi:http/proxy + wasi:keyvalue, v4.0)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -1170,6 +1171,72 @@ R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
    table (same caps, same identity). Result: unmodified Spin /
    componentize-js / JCO output deploys on a one-binary cloud — the
    single biggest adoption unlock on the board.
+
+   V4.0 GROUNDWORK (2026-07-19, derisked before the host build):
+   SPEC-AMENDMENT-3.md AUTHORED (E1 dependency decision, E2 lazy world
+   detection at INVOKE — bind stays existence-only because accept_harden
+   pins 201-then-500-at-request for junk modules, E3 same-walls
+   invocation, E4 outbound = per-ref operator grant default-deny, E5
+   wasi:keyvalue on fn_kv default-bucket-only, E6 vendored wits, E7
+   gate). PROVEN ALREADY: (a) wasmtime-wasi-http 43.0.2 HAS the sync
+   path — p2::add_to_linker_sync + p2::bindings::sync — so ONE engine
+   stands; (b) guests/proxy-echo BUILDS: pure wasi:http/proxy@0.2.6 + a
+   wasi:keyvalue/store@0.2.0-draft import, wits VENDORED from the
+   wasmtime-wasi-http/-keyvalue 43.0.2 crate sources. TWO TOOLING
+   LESSONS: cargo-component 0.21.1 does NOT auto-scan wit/deps for local
+   path targets — every dep package needs an explicit
+   [package.metadata.component.target.dependencies] entry; and its older
+   wit-parser applies @unstable feature gates asymmetrically (parses the
+   gated interface OUT of clocks but still resolves cli's gated import
+   of it) — the vendored copies have @unstable-gated IMPORT pairs
+   stripped (host unaffected; wasmtime skips them). println! is a NO-OP
+   on wasm32-unknown-unknown — the fixture writes wasi:cli stdout
+   streams explicitly. Remaining build: core deps + sync proxy runner
+   (invoke_proxy beside invoke_handler, same Quota/ledger/admission),
+   export-surface detection cached by hash, keyvalue host bindgen! on
+   fn_kv (hand-rolled Host impl — 5 fns on a table we own), outbound
+   stub-vs-real linker by routes.allow_outbound (ensure_column),
+   guests/proxy-out, accept_ecosystem.sh, ci step.
+
+   V4.0 RECORD (2026-07-19): BUILT AND SHIPPED — the ecosystem release.
+   core/src/proxy.rs is the whole runner: sync wasi-http embedding on the
+   ONE engine (E1 held — no second engine), ProxyCtx = ResourceTable +
+   WasiCtx (stdout/stderr = MemoryOutputPipe 64 KiB, read back into the A2
+   log pipeline via function::capture_lines) + WasiHttpCtx + KeelHooks +
+   MemLimiter + conn + (kind, ref). KeelHooks::send_request is the E4
+   gate: deny = HostFutureIncomingResponse::ready(Err(HttpRequestDenied))
+   — DATA to the guest, never a trap; grant = default_send_request;
+   made-count → keel_fn_outbound_total. wasi:keyvalue = hand-rolled Host
+   on fn_kv via bindgen! over wit-wasi-keyvalue/ (kv_set_bounded is the
+   ONE shared cap wall with platform-api kv); default bucket only.
+   THE SYNC-EMBEDDING SHAPE (hard-won): the response body channel buffers
+   ONE chunk, so a collector task runs CONCURRENTLY on
+   wasmtime_wasi::runtime (spawn before the call, in_tokio+timeout(5s)
+   await after into_data drops the table/writers) — and at the RESP_CAP
+   the collector DRAINS WITHOUT STORING instead of dropping the receiver
+   (dropping traps the still-writing guest and masks the verdict; drain
+   is bounded by the guest's own quotas). wasi:io contract lesson:
+   blocking-write-and-flush takes AT MOST 4096 B/call — bigger buffers
+   trap BY DESIGN (the /big fixture chunks accordingly). Detection (E2):
+   world_of walks the compiled export surface ("handle" vs
+   "wasi:http/incoming-handler@0.2"), cached in
+   EngineShared.guest_worlds; run_function detects THEN dispatches to
+   invoke_handler or invoke_proxy, and both worlds' responses unify into
+   function::RawResponse for one translation. Misbound wrong-world
+   modules now surface as engine faults (generic 500, no ledger row)
+   instead of trap outcomes — verified unpinned by any gate. routes/apps
+   gained allow_outbound (ensure_column, JSON-only field, echoed by GET).
+   Accepted costs (documented): one extra conn open per request for the
+   detection loader; proxy guests see authority()=None (Host header still
+   forwarded); collector await bounded at 5s post-return. Gate
+   accept_ecosystem.sh (#24, in CI): pure-wasi roundtrip + ledger row +
+   stdout line in /api/logs + keel-world route beside it; wasi:keyvalue
+   counter 1,2,3 → kill -9 → 4 + /api/kv listing; outbound denied
+   in-band then granted → "upstream 200: pong" + metric == 1; starvation
+   fuel → oof on the wire and in the ledger; 11 MiB response →
+   guest_error with the engine NOT wedged (next request counts). Ran ×2
+   from clean + the FULL 24-gate suite green + clippy -D warnings + 53
+   unit tests. NO keel-WIT change — v3.x guests did not rebuild.
 
    Why this order (founder voice): v3.4 is a day of polish that makes
    every demo feel professional (304s, favicon, `keel ls`) and closes

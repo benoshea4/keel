@@ -118,11 +118,15 @@ pub async fn extract_raw(req: Request) -> Result<RawReq, Response> {
     })
 }
 
-/// Run one request through a handler component and translate the classified
-/// outcome to HTTP: ok relays the guest response (content-length dropped —
-/// axum recomputes it); every other outcome is a 500 naming the outcome, and
-/// an engine error (db/compile) is a 500 naming the error. Shared by /fn/*
-/// and the phase-6 app backend path.
+/// Run one request through the bound component and translate the classified
+/// outcome to HTTP. v4.0 (E2): the component's export surface decides the
+/// world — a keel `handle` export runs the phase-4 handler path, a
+/// wasi:http/incoming-handler export runs the proxy compatibility path —
+/// same quotas, same ledger, same translation. ok relays the guest response
+/// (content-length dropped — axum recomputes it); every other outcome is a
+/// 500 naming the outcome; an engine error is the P-FIX-1 generic. Shared by
+/// /fn/* and the phase-6 app backend path.
+#[allow(clippy::too_many_arguments)] // 1:1 with the dispatch inputs
 pub fn run_function(
     shared: &Arc<EngineShared>,
     kind: &str,
@@ -131,15 +135,61 @@ pub fn run_function(
     quota: Quota,
     raw: RawReq,
     guest_path: String,
+    allow_outbound: bool,
 ) -> Response {
-    let wreq = HttpRequest {
-        method: raw.method,
-        path: guest_path,
-        query: raw.query,
-        headers: raw.headers,
-        body: raw.body,
+    // E2 — lazy world detection (never at bind: accept_harden pins that a
+    // junk module binds 201 and fails at request time). Compile is a cache
+    // hit for anything that has run before; the world itself is cached too.
+    let world = (|| -> anyhow::Result<Option<keel_core::proxy::GuestWorld>> {
+        let conn = db::open_conn(&shared.db_path)?;
+        let component = shared.component_cached(module_hash, || {
+            use anyhow::Context as _;
+            db::get_module_wasm(&conn, module_hash)?
+                .with_context(|| format!("module {module_hash} not found"))
+        })?;
+        Ok(keel_core::proxy::world_of(shared, module_hash, &component))
+    })();
+    let inv = match world {
+        Err(e) => {
+            return internal_error(&format!("dispatching {kind} {refname}"), format!("{e:#}"))
+        }
+        Ok(None) => {
+            return internal_error(
+                &format!("dispatching {kind} {refname}"),
+                "module exports neither a keel `handle` nor wasi:http/incoming-handler",
+            )
+        }
+        Ok(Some(keel_core::proxy::GuestWorld::Handler)) => {
+            let wreq = HttpRequest {
+                method: raw.method,
+                path: guest_path,
+                query: raw.query,
+                headers: raw.headers,
+                body: raw.body,
+            };
+            function::invoke_handler(shared, kind, refname, module_hash, quota, wreq)
+        }
+        Ok(Some(keel_core::proxy::GuestWorld::Proxy)) => {
+            let path_and_query = if raw.query.is_empty() {
+                guest_path
+            } else {
+                format!("{guest_path}?{}", raw.query)
+            };
+            keel_core::proxy::invoke_proxy(
+                shared,
+                kind,
+                refname,
+                module_hash,
+                quota,
+                &raw.method,
+                &path_and_query,
+                &raw.headers,
+                raw.body,
+                allow_outbound,
+            )
+        }
     };
-    match function::invoke_handler(shared, kind, refname, module_hash, quota, wreq) {
+    match inv {
         // Engine fault (db/compile/instantiate) — excluded from the ledger,
         // and (P-FIX-1) excluded from the wire: the caller's own function
         // never produced this, so the detail belongs to the operator's log.
@@ -147,34 +197,45 @@ pub fn run_function(
             &format!("invoking {kind} {refname}"),
             format!("{e:#}"),
         ),
-        Ok(inv) => match (inv.outcome, inv.response) {
-            (Outcome::Ok, Some(resp)) => {
-                let status =
-                    StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let mut out = Response::builder().status(status);
-                if let Some(h) = out.headers_mut() {
-                    for (name, value) in &resp.headers {
-                        if name.eq_ignore_ascii_case("content-length") {
-                            continue; // axum sets it from the actual body
-                        }
-                        // A guest emitting an invalid header name/value loses
-                        // that header, not the response.
-                        if let (Ok(n), Ok(v)) = (
-                            HeaderName::from_bytes(name.as_bytes()),
-                            HeaderValue::from_str(value),
-                        ) {
-                            h.insert(n, v);
+        Ok(inv) => {
+            // The two worlds' response shapes unify here (v4.0).
+            let resp = inv
+                .response
+                .map(|r| keel_core::function::RawResponse {
+                    status: r.status,
+                    headers: r.headers,
+                    body: r.body,
+                })
+                .or(inv.raw_response);
+            match (inv.outcome, resp) {
+                (Outcome::Ok, Some(resp)) => {
+                    let status = StatusCode::from_u16(resp.status)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    let mut out = Response::builder().status(status);
+                    if let Some(h) = out.headers_mut() {
+                        for (name, value) in &resp.headers {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                continue; // axum sets it from the actual body
+                            }
+                            // A guest emitting an invalid header name/value loses
+                            // that header, not the response.
+                            if let (Ok(n), Ok(v)) = (
+                                HeaderName::from_bytes(name.as_bytes()),
+                                HeaderValue::from_str(value),
+                            ) {
+                                h.insert(n, v);
+                            }
                         }
                     }
+                    out.body(Body::from(resp.body))
+                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
                 }
-                out.body(Body::from(resp.body))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                (outcome, _) => json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"outcome": outcome.as_str()}),
+                ),
             }
-            (outcome, _) => json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"outcome": outcome.as_str()}),
-            ),
-        },
+        }
     }
 }
 
@@ -252,7 +313,16 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
         let prefix = route.prefix.clone();
         let hash = route.module_hash.clone();
         drop(conn); // invoke_handler opens its own (one per invocation, §E1)
-        run_function(&shared, "function", &prefix, &hash, quota, raw, guest_path)
+        run_function(
+            &shared,
+            "function",
+            &prefix,
+            &hash,
+            quota,
+            raw,
+            guest_path,
+            route.allow_outbound,
+        )
     })
     .await;
     res.unwrap_or_else(|e| internal_error("function task panicked", e))
@@ -455,7 +525,16 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
                 }
             };
             drop(conn); // run_function opens its own (one per invocation, §E1)
-            return run_function(&shared, "app", &name, &hash, APP_QUOTA, raw, guest_path);
+            return run_function(
+                &shared,
+                "app",
+                &name,
+                &hash,
+                APP_QUOTA,
+                raw,
+                guest_path,
+                app.allow_outbound,
+            );
         }
         // 4. SPA fallback for extensionless paths (client-side routing)
         let last_seg = rest.rsplit('/').next().unwrap_or("");

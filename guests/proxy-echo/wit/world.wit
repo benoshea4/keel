@@ -1,0 +1,10 @@
+// The fixture's target world: the STANDARD wasi:http proxy world plus a
+// wasi:keyvalue import (SPEC-AMENDMENT-3.md E5/E6). Everything under deps/ is
+// vendored verbatim from the wasmtime-wasi-http / wasmtime-wasi-keyvalue
+// 43.0.2 crate sources — the exact revisions the keel host implements.
+package keel:proxy-echo-target;
+
+world guest {
+  include wasi:http/proxy@0.2.6;
+  import wasi:keyvalue/store@0.2.0-draft;
+}

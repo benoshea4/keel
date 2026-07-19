@@ -1,0 +1,36 @@
+# v4.0 acceptance guest (SPEC-AMENDMENT-3.md E6) — a PURE-ECOSYSTEM component:
+# world wasi:http/proxy@0.2.6, ZERO keel WIT. Its wit/deps tree is VENDORED
+# from the wasmtime-wasi-http 43.0.2 crate source (the exact revision the host
+# implements), so gates stay offline. It echoes the request, println!s one
+# line (the stdio→fn_logs assertion), and counts via wasi:keyvalue.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "proxy-echo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:proxy-echo"
+
+[package.metadata.component.target]
+path = "wit"
+world = "guest"
+
+[package.metadata.component.target.dependencies]
+"wasi:http" = { path = "wit/deps/http.wit" }
+"wasi:io" = { path = "wit/deps/io.wit" }
+"wasi:cli" = { path = "wit/deps/cli.wit" }
+"wasi:clocks" = { path = "wit/deps/clocks.wit" }
+"wasi:random" = { path = "wit/deps/random.wit" }
+"wasi:sockets" = { path = "wit/deps/sockets.wit" }
+"wasi:filesystem" = { path = "wit/deps/filesystem.wit" }
+"wasi:keyvalue" = { path = "wit/deps/keyvalue.wit" }

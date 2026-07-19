@@ -157,8 +157,10 @@ CREATE TABLE IF NOT EXISTS routes (
     mem_limit    INTEGER NOT NULL DEFAULT 67108864,
     time_limit_ms INTEGER NOT NULL DEFAULT 5000,
     created_at   INTEGER NOT NULL,
-    rate_limit   INTEGER                    -- Amendment 1: max admitted runs per
+    rate_limit   INTEGER,                   -- Amendment 1: max admitted runs per
                                             -- rolling 60s; NULL = unlimited
+    allow_outbound INTEGER                  -- v4.0 (E4): 1 = this ref's proxy-world
+                                            -- guest may originate HTTP; NULL/0 = deny
 );
 CREATE TABLE IF NOT EXISTS invocations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,6 +265,9 @@ pub fn migrate(c: &Connection) -> Result<()> {
     ensure_column(c, "apps", "rate_limit", "INTEGER")?;
     // v3.4 (R.1) — conditional-GET support on stored assets.
     ensure_column(c, "assets", "etag", "TEXT")?;
+    // v4.0 (E4) — per-ref outbound-HTTP grants for proxy-world guests.
+    ensure_column(c, "routes", "allow_outbound", "INTEGER")?;
+    ensure_column(c, "apps", "allow_outbound", "INTEGER")?;
     // v2.3 — kv went append-only (versioned). A pre-v2.3 kv table (no seq
     // column) is reshaped once: existing values become version 0, which any
     // later write out-versions. One transaction; idempotent by the seq check.
@@ -1100,10 +1105,13 @@ pub struct RouteRow {
     pub created_at: i64,
     /// Amendment 1: max admitted runs per rolling 60s. None = unlimited.
     pub rate_limit: Option<i64>,
+    /// v4.0 (E4): the outbound-HTTP grant for proxy-world guests.
+    pub allow_outbound: bool,
 }
 
 /// Bind (or re-bind — POST is how the 5.6 gate lowers /fn/echo's fuel) a URL
 /// prefix to a function component with per-route quotas.
+#[allow(clippy::too_many_arguments)] // 1:1 with the route's knobs
 pub fn upsert_route(
     c: &Connection,
     prefix: &str,
@@ -1112,21 +1120,24 @@ pub fn upsert_route(
     mem_limit: i64,
     time_limit_ms: i64,
     rate_limit: Option<i64>,
+    allow_outbound: bool,
 ) -> Result<()> {
     c.execute(
-        "INSERT INTO routes (prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at, rate_limit)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO routes (prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at, rate_limit, allow_outbound)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(prefix) DO UPDATE SET module_hash = excluded.module_hash,
              fuel_limit = excluded.fuel_limit, mem_limit = excluded.mem_limit,
-             time_limit_ms = excluded.time_limit_ms, rate_limit = excluded.rate_limit",
-        rusqlite::params![prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, now_ms(), rate_limit],
+             time_limit_ms = excluded.time_limit_ms, rate_limit = excluded.rate_limit,
+             allow_outbound = excluded.allow_outbound",
+        rusqlite::params![prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, now_ms(), rate_limit, allow_outbound as i64],
     )?;
     Ok(())
 }
 
 pub fn list_routes(c: &Connection) -> Result<Vec<RouteRow>> {
     let mut stmt = c.prepare(
-        "SELECT prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at, rate_limit
+        "SELECT prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at, rate_limit,
+                COALESCE(allow_outbound, 0)
          FROM routes ORDER BY prefix",
     )?;
     let rows = stmt
@@ -1139,6 +1150,7 @@ pub fn list_routes(c: &Connection) -> Result<Vec<RouteRow>> {
                 time_limit_ms: r.get(4)?,
                 created_at: r.get(5)?,
                 rate_limit: r.get(6)?,
+                allow_outbound: r.get::<_, i64>(7)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1330,12 +1342,14 @@ pub fn upsert_app(
     name: &str,
     backend_hash: Option<&str>,
     rate_limit: Option<i64>,
+    allow_outbound: bool,
 ) -> Result<()> {
     c.execute(
-        "INSERT INTO apps (name, backend_hash, created_at, rate_limit) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO apps (name, backend_hash, created_at, rate_limit, allow_outbound)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(name) DO UPDATE SET backend_hash = excluded.backend_hash,
-             rate_limit = excluded.rate_limit",
-        rusqlite::params![name, backend_hash, now_ms(), rate_limit],
+             rate_limit = excluded.rate_limit, allow_outbound = excluded.allow_outbound",
+        rusqlite::params![name, backend_hash, now_ms(), rate_limit, allow_outbound as i64],
     )?;
     Ok(())
 }
@@ -1346,16 +1360,19 @@ pub struct AppRec {
     pub backend_hash: Option<String>,
     /// Amendment 1: like RouteRow.rate_limit, for the api/* backend calls.
     pub rate_limit: Option<i64>,
+    /// v4.0 (E4): outbound-HTTP grant for a proxy-world backend.
+    pub allow_outbound: bool,
 }
 
 pub fn get_app(c: &Connection, name: &str) -> Result<Option<AppRec>> {
     Ok(c.query_row(
-        "SELECT backend_hash, rate_limit FROM apps WHERE name = ?1",
+        "SELECT backend_hash, rate_limit, COALESCE(allow_outbound, 0) FROM apps WHERE name = ?1",
         [name],
         |r| {
             Ok(AppRec {
                 backend_hash: r.get(0)?,
                 rate_limit: r.get(1)?,
+                allow_outbound: r.get::<_, i64>(2)? != 0,
             })
         },
     )
@@ -2030,7 +2047,7 @@ mod tests {
         let rows = list_routes(&c).unwrap();
         assert_eq!(rows[0].rate_limit, None);
         // And the new column round-trips.
-        upsert_route(&c, "/fn/old", "h", 1, 2, 3, Some(5)).unwrap();
+        upsert_route(&c, "/fn/old", "h", 1, 2, 3, Some(5), false).unwrap();
         assert_eq!(list_routes(&c).unwrap()[0].rate_limit, Some(5));
     }
 

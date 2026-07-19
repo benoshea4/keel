@@ -19,6 +19,7 @@ pub mod journal;
 pub mod judge;
 pub mod notifier;
 pub mod provider;
+pub mod proxy;
 pub mod runner;
 pub mod sandbox;
 

@@ -755,6 +755,12 @@ pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, 
         "keel_fn_over_capacity_total {}\n",
         shared.fn_over_capacity.load(std::sync::atomic::Ordering::Relaxed)
     ));
+    // v4.0 (E4) — outbound requests actually made by granted proxy refs.
+    out.push_str("# HELP keel_fn_outbound_total Outbound HTTP requests made by outbound-granted refs.\n# TYPE keel_fn_outbound_total counter\n");
+    out.push_str(&format!(
+        "keel_fn_outbound_total {}\n",
+        shared.fn_outbound.load(std::sync::atomic::Ordering::Relaxed)
+    ));
     out.push_str("# HELP keel_compiled_cache_size Compiled components held in memory (bounded by --max-compiled-modules).\n# TYPE keel_compiled_cache_size gauge\n");
     out.push_str(&format!(
         "keel_compiled_cache_size {}\n",
@@ -926,17 +932,21 @@ pub async fn create_route(
     if rate.is_some_and(|r| r <= 0) {
         return Err(bad("rate_limit must be positive (omit it for unlimited)"));
     }
+    // v4.0 (E4): outbound HTTP for proxy-world guests — an operator grant,
+    // default deny. JSON bool; the /routes form doesn't expose it (API-only).
+    let allow_outbound = body.get("allow_outbound").and_then(Value::as_bool).unwrap_or(false);
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     if !db::module_exists(&conn, hash).map_err(internal)? {
         return Err(bad(format!("unknown module hash {hash}")));
     }
-    db::upsert_route(&conn, prefix, hash, fuel, mem, time_ms, rate).map_err(internal)?;
+    db::upsert_route(&conn, prefix, hash, fuel, mem, time_ms, rate, allow_outbound)
+        .map_err(internal)?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "prefix": prefix, "module_hash": hash,
             "fuel_limit": fuel, "mem_limit": mem, "time_limit_ms": time_ms,
-            "rate_limit": rate,
+            "rate_limit": rate, "allow_outbound": allow_outbound,
         })),
     ))
 }
@@ -954,7 +964,7 @@ pub async fn list_routes(
                 "prefix": r.prefix, "module_hash": r.module_hash,
                 "fuel_limit": r.fuel_limit, "mem_limit": r.mem_limit,
                 "time_limit_ms": r.time_limit_ms, "created_at": r.created_at,
-                "rate_limit": r.rate_limit,
+                "rate_limit": r.rate_limit, "allow_outbound": r.allow_outbound,
             })
         })
         .collect();
@@ -1153,10 +1163,14 @@ pub async fn create_app(
             return Err(bad(format!("unknown module hash {h}")));
         }
     }
-    db::upsert_app(&conn, name, backend, rate).map_err(internal)?;
+    let allow_outbound = body.get("allow_outbound").and_then(Value::as_bool).unwrap_or(false);
+    db::upsert_app(&conn, name, backend, rate, allow_outbound).map_err(internal)?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({"name": name, "backend_hash": backend, "rate_limit": rate})),
+        Json(json!({
+            "name": name, "backend_hash": backend, "rate_limit": rate,
+            "allow_outbound": allow_outbound,
+        })),
     ))
 }
 

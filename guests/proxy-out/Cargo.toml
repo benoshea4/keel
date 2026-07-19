@@ -1,0 +1,34 @@
+# v4.0 acceptance guest (SPEC-AMENDMENT-3.md E4/E6) — the OUTBOUND fixture:
+# makes ONE outgoing GET to the local stub (:18080) and relays the answer.
+# Without the per-ref allow_outbound grant the guest sees a clean error-code
+# (never a hang) — the E4 posture, asserted from its response body.
+#
+# Build with:  cargo component build --release --target wasm32-unknown-unknown
+
+[package]
+name = "proxy-out"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# version matches what cargo-component 0.21.1 generates bindings for
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "keel:proxy-out"
+
+[package.metadata.component.target]
+path = "wit"
+world = "guest"
+
+[package.metadata.component.target.dependencies]
+"wasi:http" = { path = "wit/deps/http.wit" }
+"wasi:io" = { path = "wit/deps/io.wit" }
+"wasi:cli" = { path = "wit/deps/cli.wit" }
+"wasi:clocks" = { path = "wit/deps/clocks.wit" }
+"wasi:random" = { path = "wit/deps/random.wit" }
+"wasi:sockets" = { path = "wit/deps/sockets.wit" }
+"wasi:filesystem" = { path = "wit/deps/filesystem.wit" }

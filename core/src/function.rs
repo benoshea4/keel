@@ -36,10 +36,47 @@ const MAX_LINE_BYTES: usize = 2048;
 
 /// Amendment 2 (A7) — the kv caps, public-plane discipline: a tokenless
 /// caller must not be able to grow the database. Named in every err.
+/// v4.0 (E5): wasi:keyvalue shares this exact enforcement — one wall.
 const KV_KEY_MAX: usize = 256;
 const KV_VALUE_MAX: usize = 64 * 1024;
 const KV_MAX_KEYS: i64 = 1024;
 const KV_MAX_BYTES: i64 = 8 * 1024 * 1024;
+
+/// The ONE bounded kv write path (A7 + E5): door checks, then cap check +
+/// upsert under an IMMEDIATE txn (concurrent writers to a ref serialize, so
+/// the per-ref totals can't be over-admitted by a race). Commit is the
+/// durability point — the row is on disk before this returns.
+pub(crate) fn kv_set_bounded(
+    db: &mut rusqlite::Connection,
+    kind: &str,
+    refname: &str,
+    key: &str,
+    value: &[u8],
+) -> Result<(), String> {
+    if key.len() > KV_KEY_MAX {
+        return Err(format!("key exceeds {KV_KEY_MAX} bytes"));
+    }
+    if value.len() > KV_VALUE_MAX {
+        return Err(format!("value exceeds {KV_VALUE_MAX} bytes"));
+    }
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("engine error: {e:#}"))?;
+    let (keys, bytes) =
+        db::kv_usage(&tx, kind, refname).map_err(|e| format!("engine error: {e:#}"))?;
+    // Overwrites of an existing key must not trip the key-count cap; the byte
+    // cap counts the old value until the upsert lands — safely conservative.
+    let existing =
+        db::kv_get(&tx, kind, refname, key).map_err(|e| format!("engine error: {e:#}"))?;
+    if existing.is_none() && keys >= KV_MAX_KEYS {
+        return Err(format!("ref already holds {KV_MAX_KEYS} keys"));
+    }
+    if bytes + value.len() as i64 > KV_MAX_BYTES {
+        return Err(format!("ref would exceed {KV_MAX_BYTES} total value bytes"));
+    }
+    db::kv_set(&tx, kind, refname, key, value).map_err(|e| format!("engine error: {e:#}"))?;
+    tx.commit().map_err(|e| format!("engine error: {e:#}"))
+}
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 char.
 fn truncate_line(mut s: String, max: usize) -> String {
@@ -138,37 +175,8 @@ impl platform_api::Host for FnCtx {
     }
 
     fn kv_set(&mut self, key: String, value: Vec<u8>) -> Result<(), String> {
-        if key.len() > KV_KEY_MAX {
-            return Err(format!("key exceeds {KV_KEY_MAX} bytes"));
-        }
-        if value.len() > KV_VALUE_MAX {
-            return Err(format!("value exceeds {KV_VALUE_MAX} bytes"));
-        }
-        // Cap check + write under ONE IMMEDIATE transaction: concurrent
-        // writers to the same ref serialize here, so the per-ref totals can't
-        // be over-admitted by a race (the caps are the public-plane wall —
-        // approximately enforced is not enforced). Commit is the durability
-        // point, still before the call returns (A7).
-        let tx = self
-            .db
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| format!("engine error: {e:#}"))?;
-        let (keys, bytes) =
-            db::kv_usage(&tx, &self.kind, &self.refname).map_err(|e| format!("engine error: {e:#}"))?;
-        // Overwrites of an existing key must not trip the key-count cap; the
-        // byte cap counts the old value until the upsert lands — safely
-        // conservative.
-        let existing = db::kv_get(&tx, &self.kind, &self.refname, &key)
-            .map_err(|e| format!("engine error: {e:#}"))?;
-        if existing.is_none() && keys >= KV_MAX_KEYS {
-            return Err(format!("ref already holds {KV_MAX_KEYS} keys"));
-        }
-        if bytes + value.len() as i64 > KV_MAX_BYTES {
-            return Err(format!("ref would exceed {KV_MAX_BYTES} total value bytes"));
-        }
-        db::kv_set(&tx, &self.kind, &self.refname, &key, &value)
-            .map_err(|e| format!("engine error: {e:#}"))?;
-        tx.commit().map_err(|e| format!("engine error: {e:#}"))
+        let (kind, refname) = (self.kind.clone(), self.refname.clone());
+        kv_set_bounded(&mut self.db, &kind, &refname, &key, &value)
     }
 
     fn kv_delete(&mut self, key: String) {
@@ -178,14 +186,53 @@ impl platform_api::Host for FnCtx {
     }
 }
 
+/// v4.0 — a world-agnostic HTTP response (the proxy path has no bindgen
+/// HttpResponse; the dispatcher translates either shape identically).
+pub struct RawResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
 /// Everything the ledger + HTTP layer need to know about one invocation.
-/// `response` is Some only for Outcome::Ok.
+/// Exactly one of `response` (handler world) / `raw_response` (proxy world)
+/// is Some, and only for Outcome::Ok.
 pub struct Invocation {
     pub outcome: Outcome,
     pub response: Option<HttpResponse>,
+    pub raw_response: Option<RawResponse>,
     pub fuel_used: u64,
     pub peak_mem: usize,
     pub duration_ms: u64,
+}
+
+/// A2, shared by both worlds (v4.0): apply the host-side caps and batch-write
+/// captured lines against the ledger row. Best-effort by design — a failed
+/// log write must never convert a finished invocation into a 500.
+pub(crate) fn capture_lines(
+    conn: &rusqlite::Connection,
+    kind: &str,
+    refname: &str,
+    invocation_id: i64,
+    lines: Vec<String>,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let dropped = lines.len().saturating_sub(MAX_LOG_LINES);
+    let mut capped: Vec<String> = lines
+        .into_iter()
+        .take(MAX_LOG_LINES)
+        .map(|l| truncate_line(l, MAX_LINE_BYTES))
+        .collect();
+    if dropped > 0 {
+        capped.push(format!(
+            "({dropped} lines dropped — {MAX_LOG_LINES}/invocation cap)"
+        ));
+    }
+    if let Err(e) = db::insert_fn_logs(conn, kind, refname, invocation_id, &capped) {
+        tracing::error!("fn_logs write failed for {kind} {refname}: {e:#}");
+    }
 }
 
 // --- Amendment 1 (A1): rate-limit admission, off the ledger ------------------
@@ -357,6 +404,7 @@ pub fn invoke_handler(
     Ok(Invocation {
         outcome,
         response: result.ok(),
+        raw_response: None,
         fuel_used,
         peak_mem: ctx.mem_limiter.peak,
         duration_ms,

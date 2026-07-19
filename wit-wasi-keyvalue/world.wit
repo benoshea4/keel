@@ -1,0 +1,9 @@
+// v4.0 (SPEC-AMENDMENT-3.md E5) — the HOST-side bindgen target for keel's
+// own wasi:keyvalue implementation (backed by the Amendment-2 fn_kv table).
+// deps/keyvalue.wit is the same vendored file the proxy fixtures build
+// against — one revision, both sides.
+package keel:kv-host;
+
+world kv-bindings {
+  import wasi:keyvalue/store@0.2.0-draft;
+}

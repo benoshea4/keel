@@ -1,0 +1,7 @@
+// proxy-out's target: the standard proxy world (outbound comes with it).
+// deps/ vendored — see proxy-echo/wit/world.wit.
+package keel:proxy-out-target;
+
+world guest {
+  include wasi:http/proxy@0.2.6;
+}

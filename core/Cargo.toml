@@ -22,3 +22,13 @@ tracing = "0.1"
 # v3.3 (status.md §P P-FIX-2) — sync only: Semaphore for the data-plane and
 # judge concurrency caps. Runtime-independent; the core stays thread-based.
 tokio = { version = "1", features = ["sync"] }
+# v4.0 (SPEC-AMENDMENT-3.md E1) — the ONE deliberate wasi dependency family:
+# the reference host implementation of wasi:io/clocks/random/cli streams and
+# the wasi:http types, linked ONLY into the proxy compatibility path. The
+# keel-WIT worlds stay hand-rolled. Sync bindings on the one existing engine.
+wasmtime-wasi = "43"
+wasmtime-wasi-http = "43"
+http = "1"
+hyper = "1"
+http-body-util = "0.1"
+bytes = "1"

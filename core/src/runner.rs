@@ -146,6 +146,12 @@ pub struct EngineShared {
     /// exposes it as keel_fn_over_capacity_total (no ledger row, same
     /// reasoning as fn_rate_limited).
     pub fn_over_capacity: std::sync::atomic::AtomicU64,
+    /// v4.0 (E2) — detected guest world by module hash (a type walk is cheap;
+    /// this makes it free). Entries are a byte each — no bound needed.
+    pub guest_worlds: Mutex<HashMap<String, crate::proxy::GuestWorld>>,
+    /// v4.0 (E4) — outbound HTTP requests actually made by granted refs;
+    /// /metrics exposes it as keel_fn_outbound_total.
+    pub fn_outbound: std::sync::atomic::AtomicU64,
 }
 
 impl EngineShared {
@@ -281,6 +287,8 @@ impl EngineShared {
             fn_sem: Arc::new(tokio::sync::Semaphore::new(max_fn_concurrent.max(1) as usize)),
             judge_sem: Arc::new(tokio::sync::Semaphore::new(1)),
             fn_over_capacity: std::sync::atomic::AtomicU64::new(0),
+            guest_worlds: Mutex::new(HashMap::new()),
+            fn_outbound: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
