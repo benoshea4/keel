@@ -849,7 +849,7 @@ pub async fn apps_page(State(shared): State<Arc<EngineShared>>) -> Result<Html<S
     let apps = db::list_apps(&conn)
         .map_err(internal)?
         .into_iter()
-        .map(|(name, backend, assets, _created, rate_limit)| AppRow {
+        .map(|(name, backend, assets, _created, rate_limit, _allow_outbound)| AppRow {
             short_backend: backend.as_deref().map(short).unwrap_or_default(),
             backend: backend.unwrap_or_default(),
             assets,

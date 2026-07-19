@@ -725,6 +725,25 @@ pub async fn delete_schedule(
 
 /// GET /metrics — v1.3: Prometheus text format, hand-rolled (no deps). Behind
 /// the same auth as everything else; scrapers send the bearer token.
+/// v4.1 — escape a value for a Prometheus exposition label per the text format
+/// (backslash, double-quote, newline). Route prefixes only require `/fn/` + no
+/// trailing slash + no `..`, so a prefix may legally contain `"` or `\` (the
+/// http crate accepts both raw in a request path); unescaped, one such ref in a
+/// `ref="..."` label makes the WHOLE scrape unparseable and Prometheus drops
+/// every keel metric.
+fn escape_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, ApiErr> {
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     let counts = db::status_counts(&conn).map_err(internal)?;
@@ -771,6 +790,7 @@ pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, 
     // rows ARE the histogram, re-derived per scrape.
     out.push_str("# HELP keel_fn_duration_ms Invocation duration percentiles per ref (nearest-rank from the ledger).\n# TYPE keel_fn_duration_ms gauge\n");
     for (kind, refname, p50, p95, p99) in db::duration_percentiles(&conn).map_err(internal)? {
+        let (kind, refname) = (escape_label(&kind), escape_label(&refname));
         for (q, v) in [("0.5", p50), ("0.95", p95), ("0.99", p99)] {
             out.push_str(&format!(
                 "keel_fn_duration_ms{{kind=\"{kind}\",ref=\"{refname}\",quantile=\"{q}\"}} {v}\n"
@@ -1211,14 +1231,21 @@ pub async fn set_config(
     if value.len() > 4096 {
         return Err(bad("value exceeds 4096 bytes"));
     }
-    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let mut conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    // v4.1 — check + upsert under ONE IMMEDIATE txn, mirroring kv_set_bounded:
+    // concurrent POSTs to the same ref serialize, so the 64-entry cap can't be
+    // over-admitted by a race (was check-then-act on autocommit).
+    let tx = conn
+        .transaction_with_behavior(keel_core::rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| internal(anyhow::Error::from(e)))?;
     // ≤ 64 entries per ref; overwrites of an existing name always pass.
-    if db::get_config(&conn, &kind, &refname, &name).map_err(internal)?.is_none()
-        && db::count_config(&conn, &kind, &refname).map_err(internal)? >= 64
+    if db::get_config(&tx, &kind, &refname, &name).map_err(internal)?.is_none()
+        && db::count_config(&tx, &kind, &refname).map_err(internal)? >= 64
     {
         return Err(bad("ref already holds 64 config entries"));
     }
-    db::upsert_config(&conn, &kind, &refname, &name, &value).map_err(internal)?;
+    db::upsert_config(&tx, &kind, &refname, &name, &value).map_err(internal)?;
+    tx.commit().map_err(|e| internal(anyhow::Error::from(e)))?;
     Ok(StatusCode::CREATED)
 }
 
@@ -1280,10 +1307,13 @@ pub async fn list_apps(State(shared): State<Arc<EngineShared>>) -> Result<Json<V
     let rows = db::list_apps(&conn).map_err(internal)?;
     let out: Vec<Value> = rows
         .iter()
-        .map(|(name, backend, assets, created_at, rate_limit)| {
+        .map(|(name, backend, assets, created_at, rate_limit, allow_outbound)| {
             json!({
                 "name": name, "backend_hash": backend, "assets": assets,
                 "created_at": created_at, "rate_limit": rate_limit,
+                // v4.1 — the v4.0 outbound grant is now visible to every read
+                // path (was echoed only at grant time), mirroring GET /api/routes.
+                "allow_outbound": allow_outbound,
             })
         })
         .collect();
@@ -1341,24 +1371,29 @@ pub async fn upload_assets(
                 "zip entry '{raw}' escapes the bundle (zip-slip) — rejected"
             )));
         }
-        unpacked = unpacked.saturating_add(entry.size());
-        if unpacked > MAX_UNPACKED {
+        // Fast pre-check on the HEADER claim — an honestly-large file rejects
+        // early. But the header's uncompressed_size is attacker-forgeable (to 0),
+        // so the REAL accounting below counts ACTUAL decompressed bytes with a
+        // BOUNDED read: a forged-0 header must never buy an unbounded
+        // read_to_end that OOM-kills the engine (the v4.1 zip-bomb fix).
+        if unpacked.saturating_add(entry.size()) > MAX_UNPACKED {
             return Err(bad(
                 "bundle decompresses past 256 MiB — zip bomb or wrong artifact",
             ));
         }
+        let remaining = MAX_UNPACKED - unpacked; // room left, <= MAX_UNPACKED
         let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut bytes)
+        // take(remaining + 1): if the entry yields more than the budget, the one
+        // extra byte trips the check below WITHOUT allocating past the cap.
+        let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut entry), remaining + 1);
+        std::io::Read::read_to_end(&mut limited, &mut bytes)
             .map_err(|e| bad(format!("reading zip entry '{raw}': {e}")))?;
-        // entry.size() is the HEADER's claim; trust the actual bytes too.
-        if bytes.len() as u64 > entry.size() && {
-            unpacked = unpacked.saturating_add(bytes.len() as u64 - entry.size());
-            unpacked > MAX_UNPACKED
-        } {
+        if bytes.len() as u64 > remaining {
             return Err(bad(
                 "bundle decompresses past 256 MiB — zip bomb or wrong artifact",
             ));
         }
+        unpacked = unpacked.saturating_add(bytes.len() as u64);
         entries.push((raw, bytes));
     }
     let stored = entries.len();

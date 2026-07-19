@@ -36,7 +36,11 @@ as an operator grant. **Suite = 24 gates / 53 unit tests, all in CI. Twelve
 tagged releases (v1.0–v4.0), each on a CI-verified SHA with 6 verified
 assets.** The full story: sections A–F, N (micro-cloud), O (Amendment 1),
 P (the audit), Q (v3.3), R (the approved v3.4/v3.5/v4.0 plan + records +
-ship chain). The remaining shelf is in §R's tail — all demand-driven.
+ship chain), **S (the v4.1 audit + hardening slice: 13 confirmed findings
+FIXED in-tree — incl. a P1 proxy-outbound permit-exhaustion — green on
+build/clippy/54 unit tests/4 covering gates, NOT yet a tagged release; plus
+the expanded founder shelf incl. quantum-as-a-provider + the agent runtime)**.
+The remaining shelf is in §R's tail and §S — all demand-driven.
 
 Build/run cheatsheet (run from this directory, `keel/`):
 
@@ -71,6 +75,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_polish.sh                          # must print POLISH PASS (ETag/CLI symmetry/favicon/percentiles, v3.4)
 ./scripts/accept_functions2.sh                      # must print FUNCTIONS2 PASS (config + durable kv, WIT 0.8.0, v3.5)
 ./scripts/accept_ecosystem.sh                       # must print ECOSYSTEM PASS (wasi:http/proxy + wasi:keyvalue, v4.0)
+./scripts/accept_hardv41.sh                          # must print HARDV41 PASS (§S audit fixes: proxy-outbound bound, metrics escaping, config cap; needs a free :18080)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -1276,6 +1281,341 @@ R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
    stays ranked behind these three; the hosted cloud stays
    adoption-gated (VISION.md).
 
+S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
+   (2026-07-19, unprompted continuation "review all changes like an angry
+   reviewer… note ideas like a happy founder").** A multi-agent adversarial
+   pass over the 92caf8e..HEAD diff (6 review dimensions × per-finding
+   independent verification): 15 candidate findings, **13 CONFIRMED against
+   the actual code + the vendored wasmtime-wasi-http source, 2 REFUTED as
+   intended design**. Every fix below was applied surgically (match the
+   file's own conventions) and the tree kept green: **cargo build + clippy
+   --release -D warnings clean, 54 unit tests (was 53; +1 negative-cache), and
+   the FOUR gates covering every changed area re-run PASS from clean —
+   accept_harden (concurrency/cache/timeout + the negative-cache path),
+   accept_functions2 (config atomic cap + kv), accept_polish (percentiles/
+   ETag/run--timeout/apps GET+DELETE), accept_ecosystem (proxy outbound +
+   wasi:keyvalue)** — PLUS a NEW gate **accept_hardv41.sh PASS** proving the
+   fixes no prior gate reached: S-FIX-1 (the P1 — a granted outbound to a
+   HANGING upstream is bounded to ~time_ms and the permit frees, single AND
+   under a cap-saturating flood), S-FIX-5 (a quote in a `ref` yields escaped
+   /metrics), S-FIX-8 (the config cap holds under an 8-way concurrent burst).
+   This is an audit slice, NOT a tagged release: the FULL 25-gate run + gate
+   coverage for the last two fixes (S-FIX-3 forged-header bomb needs a crafted
+   zip fixture; S-FIX-10 --timeout 0 is CLI-loop logic) must land before any
+   v4.1 tag (see S.3).
+
+   ANGRY REVIEWER — CONFIRMED + FIXED (severity-ordered):
+   - [x] S-FIX-1 (P1, availability — the headline): PROXY OUTBOUND HAS NO
+     HOST WALL-CLOCK BOUND. `KeelHooks::send_request` (proxy.rs) forwarded the
+     guest's `OutgoingRequestConfig` into `default_send_request` unclamped;
+     wasmtime-wasi-http's per-phase timeouts default to 600s AND the guest can
+     raise them. The proxy runs SYNC on the spawn_blocking thread, so a guest
+     parked in an outbound holds its `fn_sem` permit while NO wasm executes —
+     neither the epoch trap nor fuel can fire (both need a wasm boundary), and
+     the /fn TimeoutLayer 408s the client WITHOUT freeing the detached
+     closure's permit. N concurrent granted-outbound requests to a slow/hung
+     upstream pin all `--max-fn-concurrent` permits → the whole data plane
+     503s. This is exactly the P-FIX-2 invariant ("a permit is held only up
+     to time_limit_ms") violated. FIX (taken ALL THE WAY, gate-proven by
+     accept_hardv41.sh): a PROVABLE O(time_ms) bound on the permit hold from
+     three parts — (a) clamp connect/first-byte/between-bytes each to the
+     route's `time_ms` (clamp DOWN only), so a single silent hang can't burn
+     wasi-http's 600s default; (b) refuse a NEW outbound once the invocation's
+     wall-clock `budget` is spent, so a guest can't chain sub-budget calls; and
+     (c) the store's epoch_deadline (ceil(time_ms/100) ticks, bumped every
+     100ms of WALL time by the runner ticker) traps the guest at its NEXT wasm
+     boundary once wall-clock exceeds time_ms — and between any two host calls
+     the guest MUST run wasm to issue the next, so that boundary always
+     arrives. The "drip-feed residual" the first pass flagged is thus CLOSED,
+     not deferred: each per-frame gap is ≤ budget (a), and the drip loop's
+     inter-frame wasm lets the epoch (c) trap it — worst case one in-flight
+     phase (≤ budget) plus the trap. A separate thread-watchdog was
+     considered and rejected (Simplicity First): it would guard only against
+     an error in THIS bound argument, at real complexity/risk in a mature
+     tree; the argument holds because every unbounded host wait in a proxy
+     guest is one of the three clamped wasi-http phases (kv → local SQLite
+     busy_timeout; stdout → non-blocking pipe). The provider path
+     (provider.rs) already passed an explicit timeout; the proxy path lacked
+     it. Gate: a granted outbound to a HANGING upstream returns in ~time_ms
+     (not 600s/the curl cap) and a fast route serves right after; a flood of
+     hung outbounds at the cap clears in ~time_ms and the data plane stays
+     healthy.
+   - [x] S-FIX-2 (P2, availability): UNCACHED COMPILE FAILURES convoy every
+     `fn_sem` permit on the global `compile_lock`. `component_cached`
+     (runner.rs) never recorded a `Component::new` failure, so a bound-but-
+     broken module (bind is existence-only — a supported state) re-paid a full
+     BLOB copy + failed compile under `compile_lock` on EVERY request; a
+     tokenless flood of 64 parks all permits in the lock queue and stalls cold
+     workflow spawns/upgrade-preflight too. FIX: a NEGATIVE cache (hash →
+     error, bounded) checked before the compile path; content-addressed, so a
+     stale entry can never shadow a fixed module (a fix changes the hash).
+     Unit-tested (component_cache_negative_caches_compile_failures).
+   - [x] S-FIX-3 (P2, availability): ZIP-BOMB CAP BYPASSABLE. The app-asset
+     upload pre-checked `entry.size()` (the attacker-forgeable HEADER claim,
+     forgeable to 0) then did an UNBOUNDED `read_to_end` — a ~60 MiB zip of
+     zeros (deflate ~1032:1) materialised tens of GiB before the post-check,
+     OOM-killing the engine (auth-gated → P2, but the advertised defense did
+     not work). FIX: bounded read — `take(remaining+1)` then reject if over —
+     at most ~MAX_UNPACKED is ever allocated regardless of the header.
+   - [x] S-FIX-4 (P3×2, poison-tolerance): several liveness-critical locks
+     used bare `.lock().unwrap()` against the file's OWN documented convention
+     (Permit::drop et al. use `unwrap_or_else(PoisonError::into_inner)` because
+     "a release path must never panic"). `compile_lock` + the components-cache
+     sites (runner.rs) and `fn_inflight` in `admit()` + `AdmitGuard::drop`
+     (function.rs): one panic in a critical section poisons the lock; the next
+     `unwrap` panics, and a panic in `AdmitGuard::drop` DURING unwind aborts
+     the whole process (every workflow thread). FIX: poison-tolerant locking
+     at all those sites (safe — `compile_lock` guards no data, the cache holds
+     only good components, the map is a u32 counter). Near-theoretical trigger
+     (rusqlite/wasmtime surface errors as Results) but catastrophic-if-fired.
+   - [x] S-FIX-5 (P3×2, observability availability): `/metrics` interpolated
+     route prefixes into Prometheus label VALUES unescaped. A route prefix
+     legally may contain `"` or `\` (create_route only checks `/fn/` + no
+     trailing slash + no `..`; the http crate accepts both raw in a path);
+     one such ref in a `ref="…"` label makes the WHOLE scrape unparseable →
+     every keel metric goes dark until the ledger rows age out (deleting the
+     route doesn't clear them). FIX: `escape_label()` (backslash/quote/newline)
+     applied at emission — covers all current and future refs.
+   - [x] S-FIX-6 (P3, correctness under GC): `duration_percentiles` ran its
+     GROUP-BY COUNT and each `OFFSET` query in SEPARATE WAL snapshots; the
+     ledger GC deleting rows in between made a stale-`n` OFFSET fall past the
+     shrunken set → QueryReturnedNoRows → a 500'd /metrics scrape (and /usage).
+     FIX: wrap the whole read in one `unchecked_transaction` (single snapshot).
+   - [x] S-FIX-7 (P3, perf): `duration_percentiles`' per-ref `ORDER BY
+     duration_ms` had NO covering index (only idx_invocations_admit on
+     created_at), so it temp-b-tree-sorted the ref's whole ledger 3× per scrape
+     AND per /usage load — O(refs·N log N), unbounded under the keep-forever
+     default retention. The doc comment even claimed an index that didn't
+     exist. FIX: additive `idx_invocations_latency (kind, ref, duration_ms)`
+     (CREATE IF NOT EXISTS — retrofits old DBs at startup).
+   - [x] S-FIX-8 (P3, invariant): `fn_config`'s 64-entry cap was check-then-act
+     on autocommit — N concurrent authed POSTs push a ref to 64+(N-1). The
+     project ALREADY fixed this exact class for fn_kv (kv_set_bounded's
+     IMMEDIATE txn, a documented v3.5 angry-review catch); config missed it.
+     FIX: mirror it — check + upsert under one IMMEDIATE txn.
+   - [x] S-FIX-9 (P3, audit blind spot): `GET /api/apps` (and `keel ls`)
+     OMITTED `allow_outbound` — the v4.0 outbound grant was invisible to every
+     read path (echoed only at grant time), while GET /api/routes includes it.
+     A security inventory of outbound-capable refs silently missed apps. FIX:
+     `list_apps` SELECTs + emits it (AppListRow gained the field).
+   - [x] S-FIX-10 (P3, CLI correctness): `keel run --timeout` checked the
+     deadline BEFORE polling, so a workflow completing in the last sleep window
+     was reported with a STALE "still running" status, and `--timeout 0` exited
+     2 with a fabricated "starting" and ZERO polls. FIX: reorder to
+     poll → terminal-match → deadline-check → sleep (≥1 poll guaranteed; exit-2
+     status is now an observed at-or-after-deadline fact).
+   - [x] S-FIX-11 (P3, CLI robustness): `keel deploy` did `fs::read` on any
+     non-dir non-symlink entry — a FIFO in the deploy dir blocks `open(2)`
+     forever with no output (silent hang). FIX: only read regular files; skip
+     FIFO/socket/device with a warning like the symlink case.
+
+   REFUTED (intended design — recorded so they're not re-litigated):
+   - Proxy `allow_outbound` does no egress/destination filtering (SSRF once
+     granted). REAL behavior, but it IS the SPEC-AMENDMENT-3 E4 design (E4
+     names the SSRF threat and prescribes exactly the default-deny +
+     token-gated per-ref grant; no allowlist specified) — same trust model as
+     workflow http-request and effectful providers. A destination allowlist
+     across all THREE outbound paths is a hardening enhancement, demand-driven.
+   - No cross-validation between route `time_limit_ms` and the data-plane
+     TimeoutLayer (mismatched routes 408 while the sandbox keeps a permit).
+     Intended: a guest BURNING wasm is bounded by fuel/epoch, so the permit
+     frees when the run ends within time_ms — the operator invariant "keep
+     --data-timeout-secs above your largest time_limit_ms" is documented. (Note
+     the contrast with S-FIX-1, which is the genuinely-unbounded case: a guest
+     parked in a HOST outbound where fuel/epoch can't fire.)
+
+   HAPPY FOUNDER — THE EXPANDED IDEA SHELF (three tracks; all compose with
+   the existing primitives and each other; nothing repeats P-IDEA-4/5/7/8,
+   kv-cas, provider host-kv, replication). Each is a spec-amendment/ROADMAP
+   row before it is code — the Amendment-1 discipline.
+
+   PLATFORM DEPTH — turn the primitives into a closed compute mesh:
+   - M-1 **`invoke-function` from workflows** (host-api, journaled like
+     http-request; idempotency key wfid:seq): functions already call workflows
+     (start-workflow/get-workflow); this closes the missing edge so every
+     deployed fn is a durable activity library for every workflow. Reuses
+     invoke_handler + admit + the same fn_sem permit + one honest global cap.
+     Small. THE edge that makes "compute fabric" true.
+   - M-2 **Durable topics** — ONE pub-sub primitive, three delivery modes
+     (broadcast = per-sub cursor at-least-once; queue = lease+DLQ competing
+     consumers; wake = bridge into host.rs park loops). Producers: workflows
+     (journaled emit → replay never double-publishes), functions, control
+     plane (webhook ingestion for free), cron. Delivery loop = the scheduler/GC
+     pattern; ledger row per delivery. Phase-sized, but SUBSUMES P-IDEA-5
+     (cron→fn becomes "schedule targets a topic"). Highest-compounding item.
+   - M-3 **Schedules become a fabric peer** — target union {workflow | topic |
+     fn ref}; with M-1/M-2 a DAG is just a workflow that invoke-functions and
+     emits (the durable core already IS the DAG engine — journaled edges,
+     crash-proof resume). Don't build a YAML DSL. An afternoon after M-1/M-2.
+   - M-4 **Named wasi:keyvalue buckets with grants** — `open("<name>")`
+     resolves through a bucket_grants table (the allow_outbound pattern:
+     default-deny, in-band failure, a metric). One state fabric, many
+     consumers; the wasi:keyvalue semantics Spin guests already expect. Small.
+   - M-5 **Registry federation** — providers/modules are already sha256 blobs;
+     `keel add <url>/<name>@sha256:<h>` fetches from any HTTPS index, verifies
+     the hash, upserts through the existing preflight. A "marketplace" is a
+     signed static JSON index — no central service, in keeping with the SQLite
+     positioning. The Envoy-filters analogy gets its distribution channel.
+   - M-6 **Cell bridges** — a subscription target may be a REMOTE keel;
+     delivery uses journaled http-request + idempotency keys → at-least-once
+     cross-cell with dedupe on the receiver's topic_events. Multi-region as
+     FEDERATED keels, not a cluster — the invariant (one writer/node) intact.
+   Smallest set that makes the fabric real: M-1+M-2+M-3 (one WIT bump,
+   Amendment 4 = invoke-function + emit; topics/queues/targets are host-side).
+
+   ECOSYSTEM & ADOPTION — why developers show up and stay (all CLI/DX, no WIT
+   bump; only E-5 touches schema):
+   - E-1 **`keel dev`** — watch a source dir, rebuild (cargo-component/trunk/
+     jco), POST the module, rebind-by-hash (the v2.6 precedent → live swap into
+     the v3.3 LRU), stream logs. The inner loop. Pure client.rs + a watcher.
+   - E-2 **`keel check <wasm>`** — run v4.0's world_of + import introspection
+     at the CLI: report detected world, needed grants (--allow-outbound, kv,
+     config), and print the exact `keel bind`. Converts every wrong-world/
+     missing-grant 500 into a pre-deploy sentence. Closes the E2 gap without
+     touching bind semantics.
+   - E-3 **`keel import spin <spin.toml>`** — v4.0 already runs unmodified Spin
+     components; parse the MANIFEST (sources→upload, triggers→routes,
+     allowed_outbound_hosts→grant, [variables]→config, key_value_stores→already
+     fn_kv). "Point Keel at your Spin app and it runs on one binary." A
+     wadm.yaml reader is the same shape later.
+   - E-4 **`npm create keel-app`** — componentize-js/JCO already runs (v4.0
+     proved it incl. wasi:keyvalue + stdout→fn_logs); ship a JS template with
+     the vendored-wit lessons pre-solved. Aims P-IDEA-4 at the ~20:1-larger JS
+     population.
+   - E-5 **`keel push`/`keel pull`** — named tokenless-READ module bindings
+     (P-IDEA-8 posture); every keel IS a registry. Integrity is free (the hash
+     is the key). keel-to-keel first, OCI/warg only on demand.
+   - E-6 **`keel-deploy` GitHub Action** (XS) + E-7 **`/inspect/<ref>`** — one
+     page correlating an invocation's logs + verdict + fuel + peak-mem +
+     percentiles (all already keyed by (kind,ref)); the observability demo that
+     sells itself.
+
+   MOONSHOTS (honest about reality level):
+   - QUANTUM-POWERED WASM, decomposed: **M1a quantum-as-an-effectful-provider
+     is REAL NOW and fits the grain perfectly** — a `quantum` provider
+     (keel:provider@0.2.0, --provider-effectful) wrapping Braket/IBM/D-Wave
+     REST; the WORKFLOW does the durable submit→sleep→poll loop. Quantum cloud
+     jobs queue minutes-to-hours and cost real money per shot — EXACTLY the
+     crash-proof-long-running-job shape durable workflows exist for.
+     Journal-before-return + idempotency keys (v2.3) mean submit fires exactly
+     once, replay returns the recorded job-id, hybrid QAOA/VQE loops are just a
+     workflow with a provider call in the body. ~1–2 days against one vendor,
+     ZERO engine/WIT change, ships next to providers/relay. The same shape
+     works for ANY expensive async job API (GPU training, batch renders) — it
+     pays for itself as a pattern even if quantum advantage never lands.
+     **M1b QRNG→random** (real, niche/marketing). **M1c PQC** — honest: the
+     token layer is a static bearer, no asymmetric crypto to break; where PQC
+     actually bites is MODULE SIGNING (ML-DSA over the content hash, verified
+     at bind — the supply-chain story, and the substrate M3 needs). **M1d
+     quantum-solver-for-the-judge = say no** — the solver world's identity is
+     ZERO imports; a quantum backend inverts that. And for the record: nothing
+     runs WASM *on* a quantum computer and nothing will; Keel's honest claim is
+     quantum-*orchestrating*, which is better because it's true.
+   - M2 **THE AGENT RUNTIME — every AI agent is a durable workflow** (the
+     biggest swing). The machinery is ~90% built: journaled http-request +
+     idempotency = crash mid-tool-loop resumes WITHOUT re-paying tokens
+     (deterministic agents free, from invariant #1); the approval fixture IS
+     human-in-the-loop; cancel/epoch is the kill-switch; --wf-fuel-limit is the
+     runaway guard; kv versioning is agent memory that survives live upgrade;
+     live v1→v2 upgrade is swapping an agent's prompt/model MID-FLIGHT; secrets
+     holds the key; ledger + rate limits are per-agent cost control; cells are
+     per-customer isolation. New code: providers/llm (effectful, ~days) + a
+     `keel new agent` template. "Durable agents in one 8 MB binary on your own
+     box, agent state in one SQLite file you can read" — nobody has that.
+   - M3 **Verifiable execution** — (1) signed modules (M1c), (2) journal
+     head-chaining (one ensure_column: each row hashes the previous → a
+     tamper-evident execution receipt), (3) TEE cells. The journal is ALREADY
+     an audit log; Keel can make it a CRYPTOGRAPHIC one cheaply BECAUSE there's
+     one writer and one file — no distributed-consistency hole. Verdicts become
+     credentials (upgrades P-IDEA-8's playground into proctoring).
+   - M4 **The time-machine debugger** — `keel debug <wf-id>`: recovery already
+     IS re-execution against the recorded journal (invariant #2 did the hard
+     part years early), so the debugger is recovery + breakpoints. Killer verb:
+     `--fork --module <new-hash>` replays the journal prefix against a CANDIDATE
+     module and shows where its effect sequence diverges — turns upgrade
+     pre-flight from yes/no into a diff. Composes with M2 (step an agent's
+     recorded decision trace).
+   - M5 **Mid-flight workflow migration** — `keel migrate <id> --to <server>`:
+     quiesce at a journal boundary, export rows + (content-addressed) module,
+     resume on the target = the existing recovery scan on a different box.
+     Single-writer never violated (a migrated_to tombstone; no shared-write
+     moment). Dissolves VISION's one conceded limitation into a feature; the
+     spine a hosted cloud needs anyway.
+   FOUNDER RANKING: M2 agents is the adoption swing (~2 wks, no WIT bump);
+   M1a quantum provider is days for an outsized narrative + a real small market
+   (do it as the flagship effectful-provider demo); M4 debugger is the best
+   pure-product moonshot; M3 layers 1–2 are cheap differentiation; M5 waits for
+   fleet demand.
+
+   HEXAGONAL / PORTS & ADAPTERS — swappable components (added on user request).
+   The founder framing: Keel ALREADY won the hard half of hexagonal
+   architecture, and nobody says so out loud. The WASM capability boundary IS a
+   ports-and-adapters boundary — a guest (the application core) has ZERO ambient
+   capability and reaches the outside world ONLY through host-defined ports (the
+   WIT interfaces host-api / platform-api); the journal sits ON that port, and
+   the capability PROVIDERS (v2.2–v2.6: content-addressed, hot-swappable,
+   tier-graded `keel:provider` components) are already first-class, dependency-
+   inverted ADAPTERS plugged into it. That is the differentiator vs every
+   native-plugin engine, and it's shipped. The expansion is to turn the SAME
+   pattern INWARD — the engine's own infrastructure dependencies become named
+   DRIVEN PORTS with swappable adapters, so "one binary, one SQLite file" is the
+   DEFAULT adapter set, not a hardcoded fate. The INVARIANTS become the port
+   CONTRACTS every adapter must honor — which is exactly how a cell grows
+   without betraying the vision.
+   - H-1 **Name the ports.** Driven ports (engine depends on): durable-Store,
+     outbound-http, secret-store, blob-store, clock, event-sink. Driving ports
+     (drive the engine): the HTTP API, the CLI, the embedded lib (v2.2 Engine
+     façade — already a driving port!), cron, and M-2 topics. Mostly a
+     naming/refactor pass that makes the rest tractable.
+   - H-2 **Swappable Store (the big one).** db.rs hardcodes rusqlite/SQLite;
+     define a `Store` trait carrying the journal/ledger/kv ops whose CONTRACT is
+     "one writer, journal-commit-before-return." SQLite is one adapter (the
+     default); a Postgres adapter lets a cloud cell outgrow one file WITHOUT
+     becoming a cluster (still one-writer-per-workflow via advisory lock); a
+     libSQL/Turso adapter gets embedded-replica replication for free (closes the
+     "native replication" ROADMAP row without reimplementing WAL streaming);
+     :memory: (tests already use it) becomes an explicit adapter. This is the
+     scale story that keeps the invariant.
+   - H-3 **Swappable outbound-http adapter** — unifies the THREE outbound paths
+     (workflow http-request in host.rs, effectful providers, proxy KeelHooks)
+     behind ONE port. Adapters: the default (ureq / wasmtime-wasi-http), a
+     deterministic mock (record-replay = VCR for testing agents/workflows), a
+     circuit-breaker, and THE egress allowlist the refuted SSRF finding wants —
+     write it ONCE as an adapter, get it on all three paths.
+   - H-4 **Swappable secret-store** — `secret(name)` is the driving port,
+     --secrets-file just one adapter; Vault / AWS Secrets Manager / SOPS / env
+     plug in WITHOUT touching the journal's salted-hash + redaction discipline
+     (the adapter yields bytes; the security posture stays engine-side).
+   - H-5 **Swappable blob-store** for module/asset bytes — content-addressed, so
+     the hash is the key and S3/filesystem/OCI are just "where the bytes live";
+     composes with M-5 registry federation.
+   - H-6 **Testable-by-swap** — every adapter gets a fake, so the engine core is
+     testable without SQLite/network/wasmtime, and the "embeddable" positioning
+     gets stronger (embedders assemble Keel from adapters for their stack).
+   ANGRY-REVIEWER GUARDRAIL on this idea (so it doesn't become a trait
+   explosion — Simplicity First): extract a port ONLY when a SECOND real adapter
+   is demanded (a Postgres cell, a Vault shop). Until then SQLite / ureq / file
+   stay concrete. Define the port at the moment of the second adapter, never
+   speculatively — the same demand-driven discipline as the rest of the shelf.
+   The provider system is the existence proof that the model works; H-2..H-5
+   are that proof turned toward the engine's own dependencies.
+
+   S.3 — DONE THIS PASS: (a) S-FIX-1 taken all the way — the residual is
+   CLOSED by the budget-denial + clamp + epoch bound (no watchdog needed; see
+   the S-FIX-1 entry) and gate-proven; (b) accept_hardv41.sh WRITTEN + PASSING
+   (scripts/hang_stub.py is its hanging upstream), covering S-FIX-1 / S-FIX-5 /
+   S-FIX-8.
+   STILL BEFORE A v4.1 TAG: (c) gate coverage for S-FIX-3 (needs a crafted
+   forged-uncompressed-size zip fixture — python zipfile writes honest headers,
+   so this wants hand-packed bytes) and S-FIX-10 (`keel run --timeout 0` polls
+   once — CLI-loop assertion; low-risk, the reorder is self-evidently correct);
+   (d) the FULL 25-gate suite on an idle machine (accept_hardv41 joins CI after
+   accept_ecosystem); (e) docs/api.md GET /api/apps `allow_outbound` row +
+   operations.md proxy-outbound timeout note; (f) then the ship ritual
+   (CI-verified tag, hand-written notes, 6 assets). Until then this is an
+   in-tree hardening slice, green on build / clippy -D warnings / 54 unit tests
+   / accept_harden + functions2 + polish + ecosystem + hardv41.
+
 ---
 
 ## What exists (file map, current through v4.0)
@@ -1330,8 +1670,9 @@ keel/
 ├── apps/hello/              Leptos 0.7 CSR demo app (trunk; public_url="./" REQUIRED)
 ├── .github/workflows/       ci.yml (clippy -D warnings + unit tests + all 24 gates),
 │                            release.yml (v* tag → 3 platform tarballs + sha256s, by release ID)
-└── scripts/                 24 acceptance/smoke gates (the cheatsheet at the top of this
-                             file lists every one + its PASS line) + stub/ (offline http)
+└── scripts/                 24 acceptance/smoke gates in CI + accept_hardv41.sh (§S, the
+                             audit-fix gate — passes locally, joins CI at v4.1 tag time) +
+                             hang_stub.py (its hanging upstream) + stub/ (offline http)
 ```
 
 ## Invariants you must not break (condensed from SPEC.md §0)

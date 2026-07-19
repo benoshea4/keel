@@ -257,7 +257,14 @@ pub struct AdmitGuard {
 impl Drop for AdmitGuard {
     fn drop(&mut self) {
         if let Some(key) = &self.key {
-            let mut m = self.shared.fn_inflight.lock().unwrap();
+            // Poison-tolerant, matching Permit::drop: a release path must NEVER
+            // panic — a panic in Drop during unwind aborts the whole process,
+            // taking every workflow thread with it.
+            let mut m = self
+                .shared
+                .fn_inflight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(n) = m.get_mut(key) {
                 *n -= 1;
                 if *n == 0 {
@@ -293,7 +300,10 @@ pub fn admit(
     let key = format!("{kind}\0{refname}");
     let now = crate::journal::now_ms();
     let since = now - RATE_WINDOW_MS;
-    let mut m = shared.fn_inflight.lock().unwrap();
+    let mut m = shared
+        .fn_inflight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let inflight = *m.get(&key).unwrap_or(&0) as i64;
     let recent = db::recent_invocation_count(conn, kind, refname, since)?;
     if inflight + recent >= limit {

@@ -252,6 +252,11 @@ CREATE INDEX IF NOT EXISTS idx_fn_logs_ref ON fn_logs (kind, ref, id);
 -- Amendment 1 (A1): the rate-limit admission COUNT runs per request on
 -- limited refs — keep it off a table scan.
 CREATE INDEX IF NOT EXISTS idx_invocations_admit ON invocations (kind, ref, created_at);
+
+-- v4.1: covering index for duration_percentiles' per-ref ORDER BY duration_ms
+-- (p50/p95/p99 on every /metrics scrape and /usage load) — an index walk
+-- instead of a temp b-tree sort of the whole ledger per ref.
+CREATE INDEX IF NOT EXISTS idx_invocations_latency ON invocations (kind, ref, duration_ms);
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
@@ -1380,16 +1385,26 @@ pub fn get_app(c: &Connection, name: &str) -> Result<Option<AppRec>> {
 }
 
 /// One /apps-page row: (name, backend_hash, asset_count, created_at, rate_limit).
-pub type AppListRow = (String, Option<String>, i64, i64, Option<i64>);
+pub type AppListRow = (String, Option<String>, i64, i64, Option<i64>, bool);
 
 pub fn list_apps(c: &Connection) -> Result<Vec<AppListRow>> {
     let mut stmt = c.prepare(
         "SELECT a.name, a.backend_hash,
-                (SELECT COUNT(*) FROM assets WHERE app = a.name), a.created_at, a.rate_limit
+                (SELECT COUNT(*) FROM assets WHERE app = a.name), a.created_at, a.rate_limit,
+                COALESCE(a.allow_outbound, 0)
          FROM apps a ORDER BY a.name",
     )?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get::<_, i64>(5)? != 0,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -1547,10 +1562,16 @@ pub type LatencyRow = (String, String, i64, i64, i64);
 /// the sorted set via OFFSET. Ref counts are small; three indexed lookups per
 /// ref beat a hand-rolled histogram, and there is nothing to mis-bucket.
 pub fn duration_percentiles(c: &Connection) -> Result<Vec<LatencyRow>> {
+    // v4.1 — one read transaction so the COUNT and every OFFSET query see the
+    // SAME WAL snapshot. Without it, the ledger GC thread deleting rows between
+    // the COUNT and an OFFSET query could make the (stale-n) OFFSET fall past
+    // the shrunken set → QueryReturnedNoRows → a 500'd /metrics scrape.
+    let tx = c.unchecked_transaction()?;
     let mut refs: Vec<(String, String, i64)> = Vec::new();
     {
-        let mut stmt =
-            c.prepare("SELECT kind, ref, COUNT(*) FROM invocations GROUP BY kind, ref ORDER BY kind, ref")?;
+        let mut stmt = tx.prepare(
+            "SELECT kind, ref, COUNT(*) FROM invocations GROUP BY kind, ref ORDER BY kind, ref",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         for row in rows {
             refs.push(row?);
@@ -1558,9 +1579,11 @@ pub fn duration_percentiles(c: &Connection) -> Result<Vec<LatencyRow>> {
     }
     let mut out = Vec::new();
     for (kind, refname, n) in refs {
+        // Covered by idx_invocations_latency (kind, ref, duration_ms) — an
+        // index walk, no temp b-tree sort.
         let q = |p: f64| -> Result<i64> {
             let off = ((p * (n - 1) as f64).round() as i64).clamp(0, n - 1);
-            Ok(c.query_row(
+            Ok(tx.query_row(
                 "SELECT duration_ms FROM invocations WHERE kind = ?1 AND ref = ?2
                  ORDER BY duration_ms LIMIT 1 OFFSET ?3",
                 rusqlite::params![kind, refname, off],

@@ -91,22 +91,53 @@ pub fn world_of(shared: &EngineShared, hash: &str, component: &Component) -> Opt
 /// E4 — outbound HTTP is an operator grant, default deny. The hooks are the
 /// interception point wasmtime-wasi-http provides; denial is DATA to the
 /// guest (an error-code its own error handling sees), never a trap.
+///
+/// v4.1 (S-FIX-1) — the proxy runs SYNC on the spawn_blocking thread, so a
+/// guest parked in an outbound holds its fn_sem permit while NO wasm executes:
+/// neither the epoch trap nor fuel can fire (both need a wasm boundary), and
+/// the /fn TimeoutLayer 408s the client without freeing the detached closure's
+/// permit. Two host bounds close this, giving a PROVABLE O(time_ms) ceiling on
+/// the permit hold (see invoke_proxy's bound argument):
+///   (a) `max_phase` clamps every outbound network PHASE (connect / first-byte /
+///       between-bytes) to the route's time budget — a single silent hang can
+///       no longer pin a permit for wasi-http's 600s default (or a guest-raised
+///       value); and
+///   (b) `budget`/`started` refuse a NEW outbound once the invocation's
+///       wall-clock budget is spent, so a guest can't chain sub-budget calls
+///       past its deadline. What remains in-flight is bounded by (a), and the
+///       epoch deadline traps the guest at its next wasm boundary.
 struct KeelHooks {
     allow_outbound: bool,
     outbound_made: u64,
+    outbound_denied_late: u64,
+    max_phase: std::time::Duration,
+    started: std::time::Instant,
+    budget: std::time::Duration,
 }
 
 impl WasiHttpHooks for KeelHooks {
     fn send_request(
         &mut self,
         request: hyper::Request<HyperOutgoingBody>,
-        config: http_types::OutgoingRequestConfig,
+        mut config: http_types::OutgoingRequestConfig,
     ) -> HttpResult<http_types::HostFutureIncomingResponse> {
         if !self.allow_outbound {
             return Ok(http_types::HostFutureIncomingResponse::ready(Ok(Err(
                 ErrorCode::HttpRequestDenied,
             ))));
         }
+        // (b) No NEW outbound once the route's wall-clock budget is spent —
+        // in-band (DATA), never a trap, same posture as the grant denial.
+        if self.started.elapsed() >= self.budget {
+            self.outbound_denied_late += 1;
+            return Ok(http_types::HostFutureIncomingResponse::ready(Ok(Err(
+                ErrorCode::ConnectionTimeout,
+            ))));
+        }
+        // (a) Clamp DOWN only — never lengthen a guest that asked for less.
+        config.connect_timeout = config.connect_timeout.min(self.max_phase);
+        config.first_byte_timeout = config.first_byte_timeout.min(self.max_phase);
+        config.between_bytes_timeout = config.between_bytes_timeout.min(self.max_phase);
         self.outbound_made += 1;
         Ok(default_send_request(request, config))
     }
@@ -232,6 +263,11 @@ pub fn invoke_proxy(
         .stderr(stderr.clone())
         .build();
 
+    // Started BEFORE the guest run so the outbound budget (S-FIX-1) and
+    // duration_ms share one clock; setup cost is µs-scale.
+    let started = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(quota.time_ms.max(1));
+
     let ctx = ProxyCtx {
         table: ResourceTable::new(),
         wasi,
@@ -239,6 +275,12 @@ pub fn invoke_proxy(
         hooks: KeelHooks {
             allow_outbound,
             outbound_made: 0,
+            outbound_denied_late: 0,
+            // The route's own wall-clock budget bounds each outbound phase AND
+            // the total (no new outbound past `budget`).
+            max_phase: budget,
+            started,
+            budget,
         },
         mem_limiter: MemLimiter {
             limit: quota.mem,
@@ -318,7 +360,15 @@ pub fn invoke_proxy(
         })
     });
 
-    let started = std::time::Instant::now();
+    // S-FIX-1 bound argument — the fn_sem permit is held for exactly this
+    // call. It is O(time_ms): every outbound host wait is clamped to `budget`
+    // (KeelHooks (a)); no new outbound starts past `budget` (KeelHooks (b));
+    // and the store's epoch_deadline (ceil(time_ms/100) ticks, bumped every
+    // 100ms of WALL time by the runner ticker) traps the guest at its next
+    // wasm boundary once wall-clock exceeds time_ms. Between any two host
+    // calls the guest must run wasm to issue the next, so that boundary always
+    // arrives — the worst case is one in-flight phase (≤ budget) plus the
+    // trap, i.e. a small constant × time_ms, never wasi-http's 600s default.
     let call_result = (|| -> Result<(), wasmtime::Error> {
         let mut linker: Linker<ProxyCtx> = Linker::new(&shared.engine);
         wasmtime_wasi_http::p2::add_to_linker_sync(&mut linker)?;
@@ -354,6 +404,15 @@ pub fn invoke_proxy(
         shared
             .fn_outbound
             .fetch_add(hooks.outbound_made, std::sync::atomic::Ordering::Relaxed);
+    }
+    if hooks.outbound_denied_late > 0 {
+        // S-FIX-1 — the guest tried to start outbound(s) past its wall-clock
+        // budget; refused in-band. Visible so operators can spot a guest that
+        // wants a longer time_ms than it was granted.
+        tracing::info!(
+            "proxy {kind} {refname}: {} outbound(s) denied — invocation budget spent",
+            hooks.outbound_denied_late
+        );
     }
 
     // Outcome: the wasmtime call classifies traps/fuel/epoch/memory exactly

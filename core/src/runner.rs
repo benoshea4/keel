@@ -40,6 +40,14 @@ use crate::notifier::Notifier;
 struct ComponentCache {
     map: HashMap<String, (Component, u64)>,
     tick: u64,
+    /// v4.1 — NEGATIVE cache: module hashes whose bytes exist but fail to
+    /// compile (bind is existence-only, so a wrong-world/corrupt module is a
+    /// supported bound state). Without this, every request for such a module
+    /// re-pays a full BLOB copy + failed compile under compile_lock, and a
+    /// tokenless flood convoys every fn_sem permit on that lock. Content-
+    /// addressed, so a stale negative entry can never shadow a fixed module
+    /// (a fix changes the hash). Bounded like `map`.
+    bad: HashMap<String, String>,
 }
 
 impl ComponentCache {
@@ -51,6 +59,18 @@ impl ComponentCache {
             e.1 = tick;
             e.0.clone()
         })
+    }
+
+    /// v4.1 — remember a compile failure so the next request short-circuits
+    /// without touching the BLOB or the compiler. Cap-bounded (oldest-inserted
+    /// evicted); ordering doesn't matter for correctness, only for the bound.
+    fn insert_bad(&mut self, hash: &str, err: String, cap: usize) {
+        if !self.bad.contains_key(hash) && self.bad.len() >= cap.max(1) {
+            if let Some(any) = self.bad.keys().next().cloned() {
+                self.bad.remove(&any);
+            }
+        }
+        self.bad.insert(hash.to_string(), err);
     }
 
     fn insert(&mut self, hash: &str, c: Component, cap: usize) {
@@ -264,6 +284,7 @@ impl EngineShared {
             engine,
             components: Mutex::new(ComponentCache {
                 map: HashMap::new(),
+                bad: HashMap::new(),
                 tick: 0,
             }),
             compile_lock: Mutex::new(()),
@@ -335,24 +356,61 @@ impl EngineShared {
         hash: &str,
         load: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Component> {
-        if let Some(c) = self.components.lock().unwrap().get(hash) {
-            return Ok(c);
+        // Poison-tolerant like every other liveness-critical lock in this file
+        // (Permit::drop et al.): a panic elsewhere must not brick component
+        // lookup, since compile_lock guards no data and the cache only ever
+        // holds successfully-compiled components.
+        {
+            let mut cache = self
+                .components
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(c) = cache.get(hash) {
+                return Ok(c);
+            }
+            if let Some(err) = cache.bad.get(hash) {
+                return Err(anyhow::anyhow!("{err}").context("compiling module (cached failure)"));
+            }
         }
         // Cold path: compile OUTSIDE the cache lock (P-FIX-4) — hits above
         // never wait behind a compile. The compile lock makes a cold popular
         // module compile once; losers of the race re-check and return.
-        let _compiling = self.compile_lock.lock().unwrap();
-        if let Some(c) = self.components.lock().unwrap().get(hash) {
-            return Ok(c);
+        let _compiling = self
+            .compile_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        {
+            let mut cache = self
+                .components
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(c) = cache.get(hash) {
+                return Ok(c);
+            }
+            if let Some(err) = cache.bad.get(hash) {
+                return Err(anyhow::anyhow!("{err}").context("compiling module (cached failure)"));
+            }
         }
         let wasm = load()?;
         // map_err: wasmtime 43's own Error type doesn't take anyhow's .context directly
-        let c = Component::new(&self.engine, &wasm)
+        let c = match Component::new(&self.engine, &wasm)
             .map_err(anyhow::Error::from)
-            .context("compiling module")?;
+            .context("compiling module")
+        {
+            Ok(c) => c,
+            Err(e) => {
+                // v4.1 — record the failure so a flood of the same bound-but-
+                // broken module can't re-pay the BLOB copy + compile per request.
+                self.components
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert_bad(hash, format!("{e:#}"), self.max_components);
+                return Err(e);
+            }
+        };
         self.components
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(hash, c.clone(), self.max_components);
         Ok(c)
     }
@@ -366,7 +424,11 @@ impl EngineShared {
     /// v3.3 — /metrics gauge keel_compiled_cache_size (the gate asserts the
     /// --max-compiled-modules bound holds from the outside).
     pub fn compiled_cache_size(&self) -> usize {
-        self.components.lock().unwrap().map.len()
+        self.components
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .len()
     }
 }
 
@@ -654,6 +716,14 @@ mod tests {
         }
     }
 
+    /// Like load_counting but yields bytes that fail Component::new.
+    fn load_counting_junk(calls: &Cell<u32>) -> impl FnOnce() -> anyhow::Result<Vec<u8>> + '_ {
+        move || {
+            calls.set(calls.get() + 1);
+            Ok(b"\0asm not a real component".to_vec())
+        }
+    }
+
     #[test]
     fn component_cache_hit_skips_the_loader() {
         // P-FIX-3: the whole point of component_cached is that a hit never
@@ -693,5 +763,31 @@ mod tests {
             "a, b, c cold + b again after eviction = 4 loads"
         );
         assert_eq!(shared.compiled_cache_size(), 2);
+    }
+
+    #[test]
+    fn component_cache_negative_caches_compile_failures() {
+        // v4.1: a bound-but-broken module must compile-fail ONCE, then answer
+        // from the negative cache without re-reading the BLOB — the fix for the
+        // tokenless flood that would otherwise convoy every permit on
+        // compile_lock re-paying the failed compile.
+        let shared = test_shared("negcache", 64);
+        let calls = Cell::new(0u32);
+        let e1 = shared
+            .component_cached("bad", load_counting_junk(&calls))
+            .err()
+            .expect("junk bytes must fail to compile");
+        let e2 = shared
+            .component_cached("bad", load_counting_junk(&calls))
+            .err()
+            .expect("second lookup must still be an error");
+        assert_eq!(calls.get(), 1, "second lookup must not re-read the BLOB");
+        assert!(format!("{e1:#}").contains("compiling module"));
+        assert!(format!("{e2:#}").contains("cached failure"));
+        // A good module at a DIFFERENT hash is unaffected by the negative entry.
+        shared
+            .component_cached("good", load_counting(&calls))
+            .unwrap();
+        assert_eq!(shared.compiled_cache_size(), 1);
     }
 }

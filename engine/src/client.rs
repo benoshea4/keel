@@ -170,15 +170,10 @@ pub fn run(conn: &Conn, module: &str, input: &str, detach: bool, timeout: Option
     let deadline = timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
     let mut last_status = String::new();
     loop {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            eprintln!(
-                "timeout: workflow {id} still '{}' — it keeps running; watch again with \
-                 curl {}/api/workflows/{id}",
-                if last_status.is_empty() { "starting" } else { &last_status },
-                conn.server
-            );
-            std::process::exit(2);
-        }
+        // v4.1 — poll BEFORE the deadline check so exit-2 reports an OBSERVED
+        // at-or-after-deadline status (not a stale one), and --timeout 0 still
+        // gets one poll instead of exiting with a fabricated 'starting'. A
+        // workflow that finished during the last sleep is now reported here.
         let wf = conn.get_json(&format!("/api/workflows/{id}"))?;
         let status = wf["status"].as_str().unwrap_or("").to_string();
         if status != last_status {
@@ -195,8 +190,18 @@ pub fn run(conn: &Conn, module: &str, input: &str, detach: bool, timeout: Option
             "failed" => {
                 bail!("workflow failed: {}", wf["output"].as_str().unwrap_or("(no output)"));
             }
-            _ => std::thread::sleep(std::time::Duration::from_millis(500)),
+            _ => {}
         }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            eprintln!(
+                "timeout: workflow {id} still '{}' — it keeps running; watch again with \
+                 curl {}/api/workflows/{id}",
+                if last_status.is_empty() { "starting" } else { &last_status },
+                conn.server
+            );
+            std::process::exit(2);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 
@@ -295,13 +300,14 @@ fn collect_files(
         // Symlinks are skipped outright: following them invites cycles
         // (infinite recursion), and a built dist/ has no business containing
         // any. file_type() does NOT follow links, unlike path.is_dir().
-        if entry.file_type()?.is_symlink() {
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
             eprintln!("warning: skipping symlink {}", path.display());
             continue;
         }
         if path.is_dir() {
             collect_files(root, &path, out)?;
-        } else {
+        } else if ft.is_file() {
             let rel = path
                 .strip_prefix(root)
                 .expect("walked path is under root")
@@ -312,6 +318,11 @@ fn collect_files(
             let bytes =
                 std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
             out.push((rel, bytes));
+        } else {
+            // v4.1 — a FIFO/socket/device is not a regular file: std::fs::read
+            // on a FIFO blocks forever in open(2) waiting for a writer, hanging
+            // deploy silently. Skip it like a symlink.
+            eprintln!("warning: skipping special file {}", path.display());
         }
     }
     Ok(())
