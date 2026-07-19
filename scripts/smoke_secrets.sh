@@ -9,7 +9,10 @@
 #   * kill -9 mid-workflow -> replay verifies the hash against the LIVE file
 #     and completes without re-POSTing (stub counter stays put);
 #   * rotating the secret under a crashed workflow makes recovery fail LOUDLY
-#     ("changed mid-workflow"), never silently resume with the new value.
+#     ("changed mid-workflow"), never silently resume with the new value;
+#   * Amendment 4 — the ENV secret-store adapter gives the SAME guarantees
+#     (value on the wire, {{secret:...}} in the journal, hash-only rows, no
+#     raw leak) from `--secrets-env-prefix` instead of a file.
 set -euo pipefail
 DB=smoke-secrets.db; rm -f $DB $DB-shm $DB-wal
 SECRETS=smoke-secrets.env
@@ -122,5 +125,37 @@ kill -9 $ENG; ENG=""
 if grep -aq -e "$V1" -e "$V2" $DB $DB-wal $DB-shm engine.log 2>/dev/null; then
   echo "FAIL: a raw secret value leaked into the database files or engine.log"; exit 1
 fi
+
+# 6. Amendment 4 — the ENV secret-store adapter: same guarantees, no file.
+V3="sk-live-ENV-adapter-9999"
+DB2=smoke-secrets-env.db; rm -f $DB2 $DB2-shm $DB2-wal
+# The secret name 'stub-token' has a hyphen, so the env var is set via `env`
+# (bash `export` rejects hyphens; execve/`env` and std::env::var do not).
+env "KEEL_SECRET_stub-token=$V3" ./target/release/keel serve --db $DB2 \
+  --secrets-env-prefix KEEL_SECRET_ >> engine.log 2>&1 & ENG=$!
+wait_ready
+HS2=$(curl -s -X POST --data-binary @guests/secrets/target/wasm32-unknown-unknown/release/secrets.wasm \
+  "localhost:8080/api/modules?name=secrets" | python3 -c 'import sys,json;print(json.load(sys.stdin)["hash"])')
+WF3=$(curl -s -X POST localhost:8080/api/workflows -H 'content-type: application/json' \
+  -d "{\"module_hash\":\"$HS2\",\"input\":{\"base\":\"http://127.0.0.1:18081\"}}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+for i in $(seq 1 30); do ST=$(status $WF3); [ "$ST" = "completed" ] && break; sleep 1; done
+[ "$ST" = "completed" ] || { echo "FAIL: env-adapter workflow status=$ST"; exit 1; }
+# the wire carried the REAL env value...
+AUTH3=$(curl -s localhost:18081/count | python3 -c 'import sys,json;print(json.load(sys.stdin)["auth"])')
+[ "$AUTH3" = "Bearer $V3" ] || { echo "FAIL: env-adapter wire auth '$AUTH3', want 'Bearer $V3'"; exit 1; }
+# ...the journal redacted it and stored a hash only...
+JR3=$(sqlite3 $DB2 "SELECT request FROM journal WHERE workflow_id='$WF3' AND kind='http-request'")
+echo "$JR3" | grep -q '{{secret:stub-token}}' \
+  || { echo "FAIL: env-adapter journal lacks the placeholder — got $JR3"; exit 1; }
+sqlite3 $DB2 "SELECT response FROM journal WHERE workflow_id='$WF3' AND kind='secret'" | grep -q '"sha256"' \
+  || { echo "FAIL: env-adapter secret rows are not hash-shaped"; exit 1; }
+# ...and the raw env value leaked NOWHERE.
+kill -9 $ENG; ENG=""
+if grep -aq "$V3" $DB2 $DB2-wal $DB2-shm engine.log 2>/dev/null; then
+  echo "FAIL: the env secret value leaked into the database or engine.log"; exit 1
+fi
+rm -f $DB2 $DB2-shm $DB2-wal
+echo "  env adapter: value on the wire, redacted in the journal, hash-only, no leak"
 
 echo "SECRETS SMOKE PASS"

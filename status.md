@@ -1548,6 +1548,18 @@ S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
    fleet demand.
 
    HEXAGONAL / PORTS & ADAPTERS — swappable components (added on user request).
+   STATUS: STARTED 2026-07-19 (user: "commit and start hexagonal"). Governing
+   doc [SPEC-AMENDMENT-4.md](SPEC-AMENDMENT-4.md) (spec-first discipline). H-1
+   (name the ports) is written there; the FIRST port — **secret-store** — is
+   BUILT in-tree (core/src/secrets.rs): the `SecretStore` trait + `FileSecretStore`
+   (the default, refactored verbatim from `lookup_secret`) + `EnvSecretStore`
+   (the second adapter that earns the port — `--secrets-env-prefix`, 12-factor/k8s)
+   + `LayeredSecretStore` (file-before-env) + `NoSecretStore`. `secret()` in
+   host.rs now calls `self.secrets.get()` — all journaling/salted-hash/redaction
+   is UNTOUCHED above the port. Green on build/clippy/58 unit tests (+4 secrets)
+   and smoke_secrets.sh grew an env-adapter leg (same guarantees, no file). The
+   remaining ports (Store, outbound, blob, clock) stay concrete until their
+   second adapter is demanded (H-3 guardrail).
    The founder framing: Keel ALREADY won the hard half of hexagonal
    architecture, and nobody says so out loud. The WASM capability boundary IS a
    ports-and-adapters boundary — a guest (the application core) has ZERO ambient
@@ -1628,6 +1640,8 @@ keel/
 ├── SPEC-AMENDMENT-1.md      v3.1/v3.2: rate limits off the ledger, fn logs, retention, CLI
 ├── SPEC-AMENDMENT-2.md      v3.5: per-ref config + durable kv (WIT 0.8.0 — a rebuild event)
 ├── SPEC-AMENDMENT-3.md      v4.0: wasi:http/proxy compat + wasi:keyvalue + outbound grants
+├── SPEC-AMENDMENT-4.md      the hexagonal ports & adapters program (§S H-track); first
+│                            port = secret-store (file + env adapters), in-tree
 ├── VISION.md / ROADMAP.md / PROVIDERS.md / README.md
 ├── docs/                    api.md (full endpoint table), operations.md (flags/DR/fleet/
 │                            upgrade notes), guests.md, deploy/ (systemd, docker, k8s)
@@ -1644,7 +1658,8 @@ keel/
 │        testutil), function.rs (handler sandbox + invoke_handler + admit + kv_set_bounded
 │        + capture_lines), proxy.rs (v4.0: sync wasi-http runner, world detection,
 │        wasi:keyvalue Host, outbound hooks), judge.rs (solver sandbox), sandbox.rs
-│        (Quota/MemLimiter/classify), provider.rs, cron.rs, notifier.rs
+│        (Quota/MemLimiter/classify), provider.rs, cron.rs, notifier.rs,
+│        secrets.rs (Amendment 4: the secret-store PORT + file/env/layered adapters)
 │        + tests/embedded.rs, examples/embedded.rs
 ├── engine/  (the `keel` binary)
 │   ├── build.rs             asserts vendored htmx.min.js + favicon.ico exist

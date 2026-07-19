@@ -131,9 +131,10 @@ pub struct EngineShared {
     /// v1.1 — per-guest linear-memory cap in bytes (--max-guest-memory-mb).
     /// Enforced via wasmtime StoreLimits; a guest that outgrows it fails.
     pub max_guest_memory: usize,
-    /// v2.1 — --secrets-file path for the secret host call. None = the call
-    /// errs (guest-visible) with "no secrets file configured".
-    pub secrets_path: Option<String>,
+    /// v2.1 / Amendment 4 — the secret-store PORT backing the `secret` host
+    /// call. Built from --secrets-file and/or --secrets-env-prefix; a
+    /// NoSecretStore when neither is set (the call errs, guest-visible).
+    pub secrets: Arc<dyn crate::secrets::SecretStore>,
     /// Phase 4 (micro-cloud) — workflow fuel budget (--wf-fuel-limit), reset
     /// to full at every run/resume; see EngineOptions.wf_fuel_limit.
     pub wf_fuel_limit: u64,
@@ -182,12 +183,15 @@ impl EngineShared {
             api_token,
             max_guest_memory,
             secrets_path,
+            secrets_env_prefix,
             providers: provider_bytes,
             providers_effectful: provider_effectful_bytes,
             wf_fuel_limit,
             max_fn_concurrent,
             max_compiled_modules,
         } = opts;
+        // Amendment 4 — build the secret-store port from the two adapters.
+        let secrets = crate::secrets::build(secrets_path, secrets_env_prefix);
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         // Post-review hardening: epoch interruption, so a guest stuck in pure
@@ -300,7 +304,7 @@ impl EngineShared {
             upgrades: Mutex::new(std::collections::HashSet::new()),
             api_token,
             max_guest_memory,
-            secrets_path,
+            secrets,
             wf_fuel_limit,
             providers: Arc::new(std::sync::RwLock::new(providers)),
             fn_inflight: Mutex::new(HashMap::new()),
@@ -597,7 +601,7 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
         limits: wasmtime::StoreLimitsBuilder::new()
             .memory_size(shared.max_guest_memory)
             .build(),
-        secrets_path: shared.secrets_path.clone(),
+        secrets: shared.secrets.clone(),
         read_secrets: Vec::new(),
         engine: shared.engine.clone(),
         providers: shared.providers.clone(),

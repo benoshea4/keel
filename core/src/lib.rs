@@ -22,6 +22,7 @@ pub mod provider;
 pub mod proxy;
 pub mod runner;
 pub mod sandbox;
+pub mod secrets;
 
 // Consumers that type a Connection (the binary's ui.rs) use OUR rusqlite —
 // re-exported so the workspace can never end up with two versions of it.
@@ -42,8 +43,12 @@ pub struct EngineOptions {
     /// Operator bearer token — used by the binary's HTTP layer; irrelevant to
     /// most embedders (None).
     pub api_token: Option<String>,
-    /// KEY=VALUE file backing the `secret` host call.
+    /// KEY=VALUE file backing the `secret` host call (the default secret-store
+    /// adapter — SPEC-AMENDMENT-4).
     pub secrets_path: Option<String>,
+    /// Amendment 4 — the ENV secret-store adapter: `secret("API_KEY")` reads
+    /// `<prefix>API_KEY`. None = no env adapter. Both set → file-before-env.
+    pub secrets_env_prefix: Option<String>,
     /// Capability providers: (name, component bytes) — see provider.rs.
     /// PURE tier: must be import-free (the v2.2 guarantee, still enforced).
     pub providers: Vec<(String, Vec<u8>)>,
@@ -79,6 +84,7 @@ impl EngineOptions {
             max_guest_memory: 256 * 1024 * 1024,
             api_token: None,
             secrets_path: None,
+            secrets_env_prefix: None,
             providers: Vec::new(),
             providers_effectful: Vec::new(),
             wf_fuel_limit: 10_000_000_000_000,

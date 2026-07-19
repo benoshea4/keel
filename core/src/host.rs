@@ -46,9 +46,10 @@ pub struct Ctx {
     /// v1.1 — per-store resource caps (linear memory). runner.rs builds it and
     /// registers it via store.limiter().
     pub limits: wasmtime::StoreLimits,
-    /// v2.1 — --secrets-file path. Re-read on EVERY secret() call (rotation
-    /// must be visible; secret reads are rare). None = no file configured.
-    pub secrets_path: Option<String>,
+    /// v2.1 / Amendment 4 — the secret-store PORT. `get` is re-read on EVERY
+    /// secret() call (rotation must be visible; secret reads are rare). The
+    /// adapter (file / env / layered / none) is chosen at engine boot.
+    pub secrets: std::sync::Arc<dyn crate::secrets::SecretStore>,
     /// v2.1 — (name, value) of every secret THIS execution has read, in read
     /// order. The redaction set for journaled http requests: deterministic
     /// across replay because secret() traps on any value change. Never
@@ -338,7 +339,7 @@ impl keel::workflow::host_api::Host for Ctx {
             serde_json::to_string(&Req { name: name.clone() }).map_err(|e| trap(e.into()))?;
         let _span = tracing::info_span!("host_call", kind = "secret", seq).entered();
 
-        let live = lookup_secret(self.secrets_path.as_deref(), &name);
+        let live = self.secrets.get(&name);
 
         if let Some((rkind, rreq, rresp)) =
             db::get_journal_row(&self.j.db, &id, seq).map_err(trap)?
@@ -957,18 +958,6 @@ pub fn load_secrets(path: &str) -> Result<Vec<(String, String)>, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("secrets file {path}: {e}"))?;
     parse_secrets(&text)
-}
-
-/// The live half of the secret host call. Errors here are guest-visible DATA
-/// (journaled as {"err"}), not traps — a missing secret is the workflow's
-/// problem to handle, like a 404.
-fn lookup_secret(path: Option<&str>, name: &str) -> Result<String, String> {
-    let path = path.ok_or_else(|| "no --secrets-file configured on this engine".to_string())?;
-    load_secrets(path)?
-        .into_iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v)
-        .ok_or_else(|| format!("secret '{name}' not found in secrets file"))
 }
 
 /// Replace every read-secret VALUE occurring in `s` with {{secret:name}} —

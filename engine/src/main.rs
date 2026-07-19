@@ -109,6 +109,12 @@ enum Cmd {
         /// verifies against the live file). chmod 600 it.
         #[arg(long)]
         secrets_file: Option<String>,
+        /// Amendment 4 — the ENV secret-store adapter: `secret("API_KEY")`
+        /// reads `<PREFIX>API_KEY` from the process environment (12-factor /
+        /// k8s). Combine with --secrets-file (file wins). Pass just the prefix,
+        /// e.g. KEEL_SECRET_ .
+        #[arg(long, value_name = "PREFIX")]
+        secrets_env_prefix: Option<String>,
         /// v2.2 — register a capability provider: name=path.wasm (repeatable).
         /// A provider is a component implementing the keel:provider world
         /// (PROVIDERS.md); guests reach it via provider-call. Compiled and
@@ -308,6 +314,7 @@ async fn main() -> Result<()> {
             backup_interval_secs,
             backup_keep,
             secrets_file,
+            secrets_env_prefix,
             providers,
             providers_effectful,
         } => {
@@ -327,6 +334,7 @@ async fn main() -> Result<()> {
                 backup_interval_secs,
                 backup_keep,
                 secrets_file,
+                secrets_env_prefix,
                 providers,
                 providers_effectful,
             )
@@ -376,6 +384,7 @@ async fn serve(
     backup_interval_secs: u64,
     backup_keep: usize,
     secrets_file: Option<String>,
+    secrets_env_prefix: Option<String>,
     providers: Vec<String>,
     providers_effectful: Vec<String>,
 ) -> Result<()> {
@@ -430,6 +439,13 @@ async fn serve(
     opts.max_guest_memory = max_guest_memory_mb.max(1) * 1024 * 1024;
     opts.wf_fuel_limit = wf_fuel_limit;
     opts.secrets_path = secrets_file;
+    opts.secrets_env_prefix = secrets_env_prefix;
+    // Amendment 4 — surface which secret-store adapter(s) resolved at boot.
+    tracing::info!(
+        "secret store: {}",
+        keel_core::secrets::build(opts.secrets_path.clone(), opts.secrets_env_prefix.clone())
+            .describe()
+    );
     opts.providers = provider_bytes;
     opts.providers_effectful = provider_effectful_bytes;
     opts.max_fn_concurrent = max_fn_concurrent;
