@@ -21,6 +21,23 @@ verified, and every deviation from the spec and why.
   unit tests, cancel endpoint + epoch interruption, upgrade pre-flight, atomic
   wake txn, panic guard, indexes, hardened scripts (offline, self-cleaning), CI.
 
+**WHERE THINGS STAND NOW (2026-07-19, through v4.0):** everything above plus
+v1.1–v2.6 (auth, effects, secrets, cron, DR, fleet cells, crate split,
+providers pure/effectful/registry, kv versioning, idempotency keys, OTel),
+the ENTIRE micro-cloud extension v2.7–v3.0 (serverless functions, the judge,
+hosted full-stack apps), Amendment 1 as v3.1–v3.2 (rate limits off the
+ledger, captured fn logs, ledger retention, the client CLI), the §P audit's
+fixes as v3.3–v3.4 (sanitized public faults, global sandbox cap, bounded
+compile cache, data-plane deadline; ETag/304, API+CLI symmetry, favicon,
+percentiles), Amendment 2 as v3.5 (per-ref config + durable kv, WIT 0.8.0),
+and Amendment 3 as v4.0 — THE ECOSYSTEM RELEASE: unmodified wasi:http/proxy
+components on the same /fn routes, wasi:keyvalue on the same store, outbound
+as an operator grant. **Suite = 24 gates / 53 unit tests, all in CI. Twelve
+tagged releases (v1.0–v4.0), each on a CI-verified SHA with 6 verified
+assets.** The full story: sections A–F, N (micro-cloud), O (Amendment 1),
+P (the audit), Q (v3.3), R (the approved v3.4/v3.5/v4.0 plan + records +
+ship chain). The remaining shelf is in §R's tail — all demand-driven.
+
 Build/run cheatsheet (run from this directory, `keel/`):
 
 ```bash
@@ -1261,57 +1278,61 @@ R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
 
 ---
 
-## What exists (file map, all phases)
+## What exists (file map, current through v4.0)
 
 ```
 keel/
 ├── Cargo.toml               workspace = ["core", "engine"], exclude guests+providers (dev. 5)
-├── core/                    keel-core LIBRARY (v2.2 split): db/journal/notifier/host/
-│                            runner/cron/provider + the Engine façade (lib.rs), the
-│                            embedded gate (tests/embedded.rs, examples/embedded.rs)
-├── provider-wit/            keel:provider worlds — pure + effectful (PROVIDERS.md)
-├── providers/greet/         sample PURE provider component (smoke_providers.sh)
-├── providers/relay/         sample EFFECTFUL provider (smoke_providers_effectful.sh, v2.5)
-├── SPEC.md                  the build spec — THE source of truth
-├── status.md                this file
-├── README.md                quick start + cancel/tests/security sections (the spec's verbatim
-│                            runaway-guest warning was retired by hardening E — it is no longer true)
-├── wit/workflow.wit         0.3.0 contract: http-get/sleep-ms/now-ms/random-u64/await-event/
-│                            checkpoint/log imports; run + resume exports
-├── engine/
-│   ├── build.rs             Task 2.8 — fails the build if assets/htmx.min.js is missing
-│   ├── assets/              htmx.min.js (2.0.10, vendored+committed) + style.css (exact spec palette)
-│   ├── templates/           askama: dashboard, _workflows_table, workflow, _workflow_detail, modules
-│   └── src/
-│       ├── main.rs          CLI (serve --db --listen --max-running) + recovery scan + router
-│       ├── db.rs            full schema (5 tables) + open_conn() + set_status() + ALL SQL helpers (dev. 8)
-│       ├── journal.rs       §6 journaled() core — SPEC-VERBATIM, the heart of the engine
-│       ├── host.rs          host-api impl; park loops (2.4/2.5); checkpoint (3.3); AbortForUpgrade
-│       ├── notifier.rs      condvar wake-ups + abort set (latency only, never correctness)
-│       ├── runner.rs        EngineShared + thread-per-workflow + Permit cap + thread registry +
-│       │                    snapshot-aware start (resume) + abort-sentinel result match
-│       ├── api.rs           JSON API, 7 endpoints incl. upgrade + cancel; several also accept form/multipart
-│       └── ui.rs            askama-render-to-Html handlers + embedded assets + upgrade control
-├── guests/demo/             Task 1.6 acceptance guest (src/bindings.rs is GENERATED — don't edit);
-│                            fetch url read from input {"url": ...} (hardening A)
-├── guests/approval/         Task 2.9 acceptance guest: await-event("approve") → sleep 60s → output
-├── guests/counter/          Task 3.7 acceptance guest: v1/v2 via feature flag; ticks + checkpoints
-├── guests/spin/             cancel-me fixture: spins in pure wasm forever (hardening E)
-├── .github/workflows/ci.yml clippy -D warnings + unit tests + all four scripts (hardening F)
-├── .github/workflows/release.yml  v* tag → stripped binaries (linux x86_64, macOS arm64)
-│                            tarred + sha256, attached to the GitHub release
-└── scripts/
-    ├── accept_phase1.sh     Task 1.7 assertions; harness hardened (trap/readiness/local stub)
-    ├── accept_phase2.sh     Task 2.10 — kill -9 at both park points; W1==W2; UI smoke
-    ├── accept_phase3.sh     Task 3.8 — pruning; resume recovery; v1→v2 live upgrade; 409 negative
-    ├── smoke_cancel.sh      cancel both ways: parked (park loop) + spinning (epoch trap)
-    ├── smoke_auth.sh        v1.1 gate: bearer/cookie auth + guest memory cap
-    └── stub/body.txt        fixed body served on :18080 by accept_phase1.sh
+├── SPEC.md                  the base build spec — source of truth for phases 1–3
+├── SPEC-MICROCLOUD.md       micro-cloud extension (phases 4–6), pristine external copy
+├── SPEC-AMENDMENT-1.md      v3.1/v3.2: rate limits off the ledger, fn logs, retention, CLI
+├── SPEC-AMENDMENT-2.md      v3.5: per-ref config + durable kv (WIT 0.8.0 — a rebuild event)
+├── SPEC-AMENDMENT-3.md      v4.0: wasi:http/proxy compat + wasi:keyvalue + outbound grants
+├── VISION.md / ROADMAP.md / PROVIDERS.md / README.md
+├── docs/                    api.md (full endpoint table), operations.md (flags/DR/fleet/
+│                            upgrade notes), guests.md, deploy/ (systemd, docker, k8s)
+├── wit/workflow.wit         keel:workflow@0.8.0 — host-api (workflows), platform-api
+│                            (functions: log/now/random/start-workflow/get-workflow/
+│                            config-get/kv-*), worlds workflow + handler + solver
+├── provider-wit/            keel:provider 0.2.0 — pure + effectful worlds
+├── wit-wasi-keyvalue/       host-side bindgen target for keel's wasi:keyvalue impl (v4.0);
+│                            deps/keyvalue.wit vendored, same file the proxy fixtures use
+├── core/  (keel-core — everything journal-shaped + the sandboxes)
+│   └── src: lib.rs (Engine façade + EngineOptions), db.rs (schema/migrate/ALL SQL),
+│        journal.rs (§6 journaled() — the heart), host.rs (workflow host-api + park loops),
+│        runner.rs (EngineShared, component LRU cache, thread-per-workflow, permits,
+│        testutil), function.rs (handler sandbox + invoke_handler + admit + kv_set_bounded
+│        + capture_lines), proxy.rs (v4.0: sync wasi-http runner, world detection,
+│        wasi:keyvalue Host, outbound hooks), judge.rs (solver sandbox), sandbox.rs
+│        (Quota/MemLimiter/classify), provider.rs, cron.rs, notifier.rs
+│        + tests/embedded.rs, examples/embedded.rs
+├── engine/  (the `keel` binary)
+│   ├── build.rs             asserts vendored htmx.min.js + favicon.ico exist
+│   ├── assets/              htmx.min.js, style.css, favicon.ico (all embedded)
+│   ├── templates/           askama pages + polling partials (dashboard, workflows, modules,
+│   │                        schedules, providers, routes, playground, usage, apps, logs, login)
+│   └── src: main.rs (CLI: serve/backup/fleet + client verbs; router; GC/backup/scheduler
+│        loops; data-plane TimeoutLayer), api.rs (the whole control plane incl. config/kv,
+│        metrics), dispatch.rs (PUBLIC data plane: /fn + /apps, world-aware run_function,
+│        admission, permits, asset ETags), auth.rs, ui.rs, client.rs (thin CLI verbs),
+│        fleet.rs (cell supervisor)
+├── guests/                  fixtures, each standalone (Cargo.lock + generated bindings.rs
+│   │                        committed; target/ ignored)
+│   ├── workflow world:      demo, approval, counter (v1/v2), spin, effects, secrets,
+│   │                        kvup, kvup2, loadgen, providerdemo, relay
+│   ├── handler world:       echo-fn, starter-fn, burn-fn (v3.3 slow fixture),
+│   │                        kvcfg-fn (v3.5 config+kv fixture)
+│   ├── solver world:        sum-solver, loop-solver, hog-solver
+│   └── wasi:http/proxy:     proxy-echo (+wasi:keyvalue counter, /big cap probe),
+│                            proxy-out (outbound fixture) — wits VENDORED under each
+│                            (cargo-component needs explicit target.dependencies entries)
+├── providers/               greet (pure), relay (effectful) sample providers
+├── apps/hello/              Leptos 0.7 CSR demo app (trunk; public_url="./" REQUIRED)
+├── .github/workflows/       ci.yml (clippy -D warnings + unit tests + all 24 gates),
+│                            release.yml (v* tag → 3 platform tarballs + sha256s, by release ID)
+└── scripts/                 24 acceptance/smoke gates (the cheatsheet at the top of this
+                             file lists every one + its PASS line) + stub/ (offline http)
 ```
-(v1.1 additions inside engine/: src/auth.rs — token middleware; templates/login.html.)
-
-Read the header comment of each file first — they carry the invariants and mark every
-PHASE 2 / PHASE 3 surgery point with the task number.
 
 ## Invariants you must not break (condensed from SPEC.md §0)
 
