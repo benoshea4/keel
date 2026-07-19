@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel — logs</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Logs — <code>{{ refname }}</code></h1>
+    <nav><a href="/">Workflows</a><a href="/modules">Modules</a><a href="/schedules">Schedules</a><a href="/providers">Providers</a><a href="/routes">Routes</a><a href="/playground">Playground</a><a href="/apps">Apps</a><a href="/usage">Usage</a>{% if authed %}<a href="/logout">Log out</a>{% endif %}</nav>
+  </header>
+
+  <p>{% if kind == "function" %}Lines this route's guest wrote via the
+  platform-api <code>log</code> import — newest 200, refreshed every 2s.
+  Host-side caps: 256 lines per invocation, 2 KiB per line, the newest 2000
+  lines kept per route.{% else %}Lines this app's backend function wrote via
+  the platform-api <code>log</code> import — newest 200, refreshed every 2s.
+  Host-side caps: 256 lines per invocation, 2 KiB per line, the newest 2000
+  lines kept per app.{% endif %}</p>
+
+  <div hx-get="{{ poll_url }}" hx-trigger="load, every 2s"></div>
+</body>
+</html>

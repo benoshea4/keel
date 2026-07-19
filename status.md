@@ -48,6 +48,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_phase4.sh                          # must print PHASE 4 PASS (micro-cloud functions, v2.7)
 ./scripts/accept_phase5.sh                          # must print PHASE 5 PASS (judge + metering + watchdog, v2.8)
 ./scripts/accept_phase6.sh                          # must print PHASE 6 PASS (hosted apps, v3.0; needs trunk)
+./scripts/accept_operate.sh                         # must print OPERATE PASS (rate limits/logs/retention, v3.1)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -696,6 +697,86 @@ N. **Micro-cloud extension (phases 4–6) — reconciliation plan + build log
    - **Gates**: PHASE 4 PASS ×2 from clean; FULL 16-script suite green after
      (accept_phase4.sh joined CI); clippy -D warnings; 37 unit tests (2 new:
      classify order, limiter peak/deny).
+
+O. **Amendment 1 — operating the public plane + the CLI (v3.1/v3.2, started
+   2026-07-19).** User go-ahead: "continue with the build... what else do we
+   need for this to be an end to end build... you decide and build". Governing
+   doc: [SPEC-AMENDMENT-1.md](SPEC-AMENDMENT-1.md), authored in-repo per the
+   stretch-direction discipline ("spec amendment first, code second" —
+   SPEC-MICROCLOUD.md; SPEC-MICROCLOUD.md itself stays a pristine copy).
+   Two stages: v3.1 = A1 rate limits OFF THE LEDGER (routes AND apps; 60s
+   rolling window counted from invocations + an in-memory inflight term for
+   burst exactness; 429 + Retry-After from the oldest in-window row; NO
+   ledger row for a 429 — admission isn't a sandbox outcome; counter metric
+   keel_fn_rate_limited_total) + A2 fn_logs (platform-api log captured in
+   FnCtx, batch-written after the run with the invocation rowid; caps
+   256 lines/invocation, 2048 B/line char-boundary, last-2000-per-ref trim;
+   GET /api/logs with after= tailing; /logs drill-down UI page — NOT a nav
+   tab; echo-fn now logs each body line) + A3 --retain-ledger-hours (0=off,
+   immediate-first-pass 60s GC over invocations + fn_logs; fleet knob too).
+   v3.2 = A4 CLI verbs deploy/bind/run/logs (thin clients of the HTTP API,
+   ureq; --server/KEEL_SERVER, --token/KEEL_API_TOKEN same var as server).
+   NO WIT CHANGE — zero guest rebuilds (echo-fn edit uses an existing
+   import). New columns via CREATE TABLE line + ensure_column (cron
+   precedent): routes.rate_limit, apps.rate_limit (NULL = unlimited).
+   insert_invocation now RETURNS the rowid. New index idx_invocations_admit
+   (kind, ref, created_at) + idx_fn_logs_ref (kind, ref, id).
+
+   PROGRESS (tick after every task — this is the compact-resume pointer):
+   - [x] O.1 schema: rate_limit columns + fn_logs + indexes + db accessors + unit tests
+   - [x] O.2 admission (core function.rs): admit()/AdmitGuard + EngineShared inflight map + metric
+   - [x] O.3 logs capture: FnCtx logs vec + truncate + batch write + trim; echo-fn logs lines
+   - [x] O.4 surfaces: 429 in dispatch (fn + app api), /api/logs, api fields, /metrics counter
+   - [x] O.5 --retain-ledger-hours GC + fleet knob
+   - [x] O.6 UI: rate cols on /routes + /apps, /logs page + partial + row links
+   - [x] O.7 accept_operate.sh ×2 from clean + angry review + docs + FULL suite
+   - [ ] O.8 ship v3.1: push, CI green, tag on CI SHA, release + 6 assets
+   - [ ] O.9 CLI: client.rs (deploy/bind/run/logs) + accept_cli.sh ×2 + angry review
+   - [ ] O.10 ship v3.2 same ritual; update memory + ROADMAP + demo instance
+
+   V3.1 RECORD (2026-07-19):
+   - **Admission (A1)**: core/function.rs admit() → Admission::{Admitted(AdmitGuard),
+     Limited{retry_after_ms}}; ONE mutex around inflight-read + ledger COUNT +
+     increment makes the limiter EXACT under bursts (gate: 8 concurrent at
+     limit 3 → exactly 3×200/5×429); AdmitGuard releases on Drop so engine
+     faults can't leak slots; key = "kind\0ref". 429 = admission, NOT a
+     sandbox outcome → no ledger row, counter metric instead. Retry-After
+     computed from the oldest in-window row (pure-inflight window → 1s).
+     Window state = the ledger → the gate proves RESTART SURVIVAL (429
+     immediately after reboot) and frees the window by BACKDATING rows
+     instead of sleeping. Apps get the same check on api/* (kind 'app').
+   - **Logs (A2)**: FnCtx collects (256 lines/invocation, 2048B/line
+     char-boundary truncate, drop marker), batch-written AFTER
+     insert_invocation (which now returns the rowid) inside invoke_handler;
+     write failure is tracing::error, never a 500 (metering outranks
+     observability). Per-ref trim to newest 2000 at insert. /api/logs
+     (kind/ref/after/limit, after= = tail contract), /logs page + 2s partial
+     (drill-down, NOT a nav tab; linked from /routes + /apps rows).
+     echo-fn logs each body line (response unchanged — phase-4 safe).
+   - **Retention (A3)**: --retain-ledger-hours, same immediate-first-pass
+     60s loop as the workflow GC; sweeps invocations + fn_logs; fleet knob.
+   - **Schema**: routes.rate_limit + apps.rate_limit via CREATE line +
+     ensure_column (cron precedent; retrofit unit-tested); fn_logs +
+     idx_fn_logs_ref + idx_invocations_admit. get_app now returns AppRec
+     {backend_hash, rate_limit}; AppListRow 5-tuple.
+   - **Angry-review catches**: (a) THE GATE HARNESS BUG — curl -w
+     "%{http_code}" writes no newline, so cat rl-*.code concatenated into
+     one line and grep -c read 0/0; the engine was EXACT all along (debug
+     showed 200200200429429429429429). \n added + comment. (b) zsh
+     unmatched-glob bit AGAIN in a debug chain (rm -f rl-*.code aborted the
+     && chain → engine never started → misleading 000s) — bash + explicit
+     filenames for debug harnesses. (c) i64::div_ceil is UNSTABLE (unsigned
+     is stable) — manual (x+999)/1000. (d) apps.html json-enc script must
+     parseInt rate_limit — a JSON string number is silently read as absent
+     by as_i64 (comment in template). (e) fn_logs invocation_id can dangle
+     after gc_ledger (created_at ms skew between the two inserts) —
+     harmless, no FK, documented in the schema comment.
+   - **Live probes** (beyond the gate): /logs 200 + renders ref, partial
+     carries captured line, missing ref → 400, kind=solve → 400, form-shape
+     bind with rate_limit round-trips, both pages render new columns.
+   - **Suite**: OPERATE PASS ×2 from clean; FULL 19-gate suite green
+     (chunks, idle machine); 42 unit tests (5 new: retrofit, window count,
+     tail/after/trim, gc_ledger, truncate boundaries); clippy -D clean.
 
 ---
 

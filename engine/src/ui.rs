@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Html;
 
@@ -92,6 +92,22 @@ struct KvRow {
 
 fn short(s: &str) -> String {
     s.chars().take(8).collect()
+}
+
+/// Percent-encode a query-string VALUE (route prefixes contain '/'; encode
+/// everything outside RFC 3986 unreserved so a hostile ref can't split the
+/// query it is embedded in).
+fn query_enc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Module display label: its name, or a hash prefix for anonymous uploads.
@@ -207,6 +223,9 @@ struct RouteUiRow {
     mem: i64,
     time_ms: i64,
     invocations: i64,
+    /// Amendment 1: "∞" or the per-60s cap.
+    rate: String,
+    logs_url: String,
 }
 
 #[derive(Template)]
@@ -502,10 +521,12 @@ pub async fn routes_page(
             invocations: counts.get(&r.prefix).copied().unwrap_or(0),
             short_hash: short(&r.module_hash),
             hash: r.module_hash,
-            prefix: r.prefix,
             fuel: r.fuel_limit,
             mem: r.mem_limit,
             time_ms: r.time_limit_ms,
+            rate: r.rate_limit.map_or("∞".to_string(), |n| n.to_string()),
+            logs_url: format!("/logs?kind=function&ref={}", query_enc(&r.prefix)),
+            prefix: r.prefix,
         })
         .collect();
     render(RoutesPage {
@@ -775,6 +796,9 @@ struct AppRow {
     backend: String,
     short_backend: String,
     assets: i64,
+    /// Amendment 1: "∞" or the per-60s cap on api/* backend calls.
+    rate: String,
+    logs_url: String,
 }
 
 #[derive(Template)]
@@ -790,15 +814,85 @@ pub async fn apps_page(State(shared): State<Arc<EngineShared>>) -> Result<Html<S
     let apps = db::list_apps(&conn)
         .map_err(internal)?
         .into_iter()
-        .map(|(name, backend, assets, _created)| AppRow {
-            name,
+        .map(|(name, backend, assets, _created, rate_limit)| AppRow {
             short_backend: backend.as_deref().map(short).unwrap_or_default(),
             backend: backend.unwrap_or_default(),
             assets,
+            rate: rate_limit.map_or("∞".to_string(), |n| n.to_string()),
+            logs_url: format!("/logs?kind=app&ref={}", query_enc(&name)),
+            name,
         })
         .collect();
     render(AppsPage {
         apps,
         authed: shared.api_token.is_some(),
     })
+}
+
+// --- Amendment 1 (A2): the /logs drill-down ----------------------------------
+
+struct LogLineRow {
+    time: String,
+    line: String,
+}
+
+#[derive(Template)]
+#[template(path = "logs.html")]
+struct LogsPage {
+    kind: String,
+    refname: String,
+    poll_url: String,
+    authed: bool,
+}
+
+#[derive(Template)]
+#[template(path = "_log_lines.html")]
+struct LogLinesPartial {
+    lines: Vec<LogLineRow>,
+}
+
+/// Shared validation for the logs page + partial: (kind, ref) or a 400.
+fn logs_params(q: &std::collections::HashMap<String, String>) -> Result<(String, String), UiErr> {
+    let kind = q.get("kind").cloned().unwrap_or_else(|| "function".into());
+    if kind != "function" && kind != "app" {
+        return Err((StatusCode::BAD_REQUEST, "kind must be 'function' or 'app'".into()));
+    }
+    let refname = q
+        .get("ref")
+        .cloned()
+        .ok_or((StatusCode::BAD_REQUEST, "missing param: ref".to_string()))?;
+    Ok((kind, refname))
+}
+
+/// GET /logs?kind=&ref= — linked from /routes and /apps rows (a drill-down
+/// like the workflow page, not a nav tab).
+pub async fn logs_page(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Html<String>, UiErr> {
+    let (kind, refname) = logs_params(&q)?;
+    render(LogsPage {
+        poll_url: format!("/partials/logs?kind={kind}&ref={}", query_enc(&refname)),
+        kind,
+        refname,
+        authed: shared.api_token.is_some(),
+    })
+}
+
+/// GET /partials/logs?kind=&ref= — the 2s-polled tail (newest 200).
+pub async fn logs_partial(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Html<String>, UiErr> {
+    let (kind, refname) = logs_params(&q)?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let lines = db::tail_fn_logs(&conn, &kind, &refname, 200)
+        .map_err(internal)?
+        .into_iter()
+        .map(|l| LogLineRow {
+            time: ago(l.created_at),
+            line: l.line,
+        })
+        .collect();
+    render(LogLinesPartial { lines })
 }

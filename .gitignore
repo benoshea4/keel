@@ -3,6 +3,10 @@ target/
 *.db-shm
 *.db-wal
 engine.log
+# accept_operate.sh restarts the engine twice; the demo instance logs here too
+engine2.log
+engine3.log
+demo-engine.log
 .DS_Store
 # accept_phase3.sh copies the two counter artifacts here
 guests/counter/counter-v?.wasm

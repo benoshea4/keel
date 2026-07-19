@@ -18,6 +18,7 @@ Flags that matter in production:
 | `--max-guest-memory-mb` | 256 | Per-workflow linear-memory cap. |
 | `--wf-fuel-limit` | 10^13 | Micro-cloud phase 4 — per-run/resume workflow fuel budget (a runaway kill-switch, not a quota). An infinite loop fails with `runaway guest: exhausted compute budget`; parked workflows spend zero; replay resets to the full budget. Raise it only if a legitimate very-long replay ever trips it. |
 | `--retain-terminal-hours` | 0 (keep forever) | GC completed/failed workflows (journal, events, snapshots, kv included) after this many hours. |
+| `--retain-ledger-hours` | 0 (keep forever) | Amendment 1: GC invocations-ledger rows and captured function logs after this many hours. Rate limits read a 60-second window, so hours-scale retention can't interact with them. |
 | `--backup-dir` + `--backup-interval-secs` + `--backup-keep` | off / 300 / 24 | Periodic online snapshots (below). |
 | `--secrets-file` | unset | KEY=VALUE file backing the `secret` host call (below). |
 | `--provider name=path.wasm` | none | Register a PURE capability provider (repeatable) — see [PROVIDERS.md](../PROVIDERS.md). Import-free, enforced. Compiled + type-checked at boot; a bad provider fails the start. v2.6: flags UPSERT into the provider REGISTRY — the provider persists across restarts; remove with `DELETE /api/providers/{name}`, and providers can also be uploaded/rolled live via `POST /api/providers` (no restart). |
@@ -43,6 +44,14 @@ UI) honors the token like everything else, but the DATA plane — `/fn/*`
 function calls and phase-6 `/apps/*` serving — is deliberately public even
 with a token set: a browser-served app must reach its own backend tokenless.
 Don't bind a function you wouldn't expose to whoever can reach the listener.
+
+Since Amendment 1, the public plane can be *bounded*: give each route (and
+each app's backend) a `rate_limit` — max admitted runs per rolling 60 s,
+counted off the invocations ledger, so limits are exact under bursts and
+survive restarts. Over the limit → 429 with an honest `Retry-After`; watch
+`keel_fn_rate_limited_total` in `/metrics`. Pair with
+`--retain-ledger-hours` so the ledger and captured function logs can't grow
+a public listener's disk without bound.
 
 ## Secrets
 
@@ -117,7 +126,7 @@ port = 9101            # 127.0.0.1 port, unique
 db = "acme.db"
 api_token = "..."      # per-tenant root credential
 # optional per-tenant: max_running, max_guest_memory_mb,
-# retain_terminal_hours, backup_dir, backup_interval_secs, backup_keep,
+# retain_terminal_hours, retain_ledger_hours, backup_dir, backup_interval_secs, backup_keep,
 # secrets_file (per-tenant secrets — cells never share one),
 # providers = ["name=path.wasm", ...] (per-tenant capability providers)
 # providers_effectful = ["name=path.wasm", ...] (v2.5 — per-tenant effectful grants)

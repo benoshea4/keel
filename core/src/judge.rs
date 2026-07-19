@@ -101,7 +101,8 @@ pub fn judge_submission(shared: &Arc<EngineShared>, submission_id: &str) -> Resu
             (Outcome::Ok, Err(_)) => ("RE", Outcome::Trap),
             (Outcome::GuestError, _) => unreachable!("classify never returns GuestError"),
         };
-        db::insert_invocation(
+        // Solvers can't log (empty linker), so the returned rowid has no use here.
+        let _ = db::insert_invocation(
             &conn,
             "solve",
             submission_id,

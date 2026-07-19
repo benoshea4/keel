@@ -75,6 +75,8 @@ jobs:
         run: ./scripts/accept_phase5.sh
       - name: Micro-cloud phase 6 — hosted apps, the flagship slice (v3.0)
         run: ./scripts/accept_phase6.sh
+      - name: Amendment 1 — rate limits + fn logs + ledger retention (v3.1)
+        run: ./scripts/accept_operate.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

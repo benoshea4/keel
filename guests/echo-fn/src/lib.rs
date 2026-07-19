@@ -10,12 +10,21 @@
 #[allow(warnings)]
 mod bindings;
 
+use bindings::keel::workflow::platform_api;
 use bindings::{HttpRequest, HttpResponse};
 
 struct Component;
 
 impl bindings::Guest for Component {
     fn handle(req: HttpRequest) -> HttpResponse {
+        // Amendment 1 (A2): log each body line — echo-fn doubles as the
+        // fn_logs fixture (accept_operate.sh) and a live demo of the log
+        // pipeline. The response below is unchanged; phase-4 assertions hold.
+        for line in String::from_utf8_lossy(&req.body).lines() {
+            if !line.is_empty() {
+                platform_api::log(&format!("echo: {line}"));
+            }
+        }
         let body = serde_json::json!({
             "method": req.method,
             "path": req.path,

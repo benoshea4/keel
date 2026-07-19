@@ -27,17 +27,19 @@
     <input id="mem_limit" name="mem_limit" inputmode="numeric">
     <label for="time_limit_ms">Time limit, ms (blank = 5000)</label>
     <input id="time_limit_ms" name="time_limit_ms" inputmode="numeric">
+    <label for="rate_limit">Rate limit, requests per minute (blank = unlimited)</label>
+    <input id="rate_limit" name="rate_limit" inputmode="numeric">
     <button type="submit">Bind route</button>
   </form>
 
   <h2>Bound routes</h2>
   <table>
     <thead>
-      <tr><th>Prefix</th><th>Module</th><th>Fuel</th><th>Mem</th><th>Time&nbsp;ms</th><th>Invocations</th><th></th></tr>
+      <tr><th>Prefix</th><th>Module</th><th>Fuel</th><th>Mem</th><th>Time&nbsp;ms</th><th>Rate/min</th><th>Invocations</th><th></th><th></th></tr>
     </thead>
     <tbody>
       {% if routes.is_empty() %}
-      <tr><td colspan="7">No routes bound — bind a handler-world component above, then curl its prefix.</td></tr>
+      <tr><td colspan="9">No routes bound — bind a handler-world component above, then curl its prefix.</td></tr>
       {% endif %}
       {% for r in routes %}
       <tr>
@@ -46,7 +48,9 @@
         <td>{{ r.fuel }}</td>
         <td>{{ r.mem }}</td>
         <td>{{ r.time_ms }}</td>
+        <td>{{ r.rate }}</td>
         <td>{{ r.invocations }}</td>
+        <td><a href="{{ r.logs_url }}">Logs</a></td>
         <td><button hx-delete="/api/routes{{ r.prefix }}" hx-swap="none"
                     hx-confirm="Remove route '{{ r.prefix }}'? Requests to it will 404."
                     onclick="setTimeout(() => location.reload(), 300)">Remove route</button></td>

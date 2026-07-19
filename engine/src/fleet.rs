@@ -43,6 +43,9 @@ struct Tenant {
     max_running: Option<u32>,
     max_guest_memory_mb: Option<usize>,
     retain_terminal_hours: Option<u64>,
+    /// Amendment 1 (A3) — per-tenant ledger retention, like everything else
+    /// in a cell.
+    retain_ledger_hours: Option<u64>,
     backup_dir: Option<String>,
     backup_interval_secs: Option<u64>,
     backup_keep: Option<usize>,
@@ -113,6 +116,9 @@ fn spawn_tenant(exe: &std::path::Path, t: &Tenant) -> Result<Child> {
     }
     if let Some(v) = t.retain_terminal_hours {
         cmd.arg("--retain-terminal-hours").arg(v.to_string());
+    }
+    if let Some(v) = t.retain_ledger_hours {
+        cmd.arg("--retain-ledger-hours").arg(v.to_string());
     }
     if let Some(v) = &t.backup_dir {
         cmd.arg("--backup-dir").arg(v);

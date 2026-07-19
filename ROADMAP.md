@@ -8,6 +8,7 @@ definition of done) and runs in CI.
 
 | Version | What | Proof |
 |---|---|---|
+| v3.1 | **Operating the public plane** ([SPEC-AMENDMENT-1.md](SPEC-AMENDMENT-1.md) A1–A3, the stretch item "per-route rate limits off the ledger" done with the discipline it asked for): per-route AND per-app `rate_limit` (max admitted runs per rolling 60 s, counted off the invocations ledger + an in-flight term — EXACT under concurrent bursts, restart-safe by construction; 429 + honest `Retry-After`; `keel_fn_rate_limited_total`); captured function logs (platform-api `log` → `fn_logs`, 256/invocation · 2 KiB/line · newest 2000/ref, `GET /api/logs` with `after=` tailing, `/logs` drill-down page); `--retain-ledger-hours` GC. No WIT change | `accept_operate.sh` |
 | v1.0 | Durable core: journal-before-return, replay recovery, durable timers, external events, checkpoints + pruning, live v1→v2 upgrade with pre-flight, cancel (parked + spinning guests via epoch interruption), htmx UI | `accept_phase{1,2,3}.sh`, `smoke_cancel.sh`, `cargo test` |
 | v1.1 | Operator token auth (`--api-token`/`KEEL_API_TOKEN`, cookie-digest UI login), per-guest memory caps (`--max-guest-memory-mb`) | `smoke_auth.sh` |
 | v1.2 | Effects: `http-request` (method/headers/body, non-2xx as data, opt-in retries), journaled per-workflow KV (`kv-set`/`kv-get`), interval schedules (`/api/schedules`) — WIT 0.4.0 | `smoke_effects.sh` |

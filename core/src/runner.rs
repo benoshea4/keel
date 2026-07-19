@@ -77,6 +77,15 @@ pub struct EngineShared {
     /// delete API without a restart. RwLock because provider_call reads it per
     /// call; writers are the (rare) registry mutations.
     pub providers: Arc<std::sync::RwLock<HashMap<String, crate::provider::ProviderEntry>>>,
+    /// Amendment 1 (A1) — admitted-but-not-yet-ledgered runs per (kind, ref).
+    /// The ledger is the durable window state; this term only closes the gap
+    /// between admission and the row landing, so a concurrent burst can't
+    /// oversubscribe a limit. See function::admit.
+    pub fn_inflight: Mutex<HashMap<String, u32>>,
+    /// Amendment 1 (A1) — total 429'd admissions since boot (a 429 is NOT a
+    /// ledger row — admission isn't a sandbox outcome). /metrics exposes it
+    /// as keel_fn_rate_limited_total.
+    pub fn_rate_limited: std::sync::atomic::AtomicU64,
 }
 
 impl EngineShared {
@@ -200,6 +209,8 @@ impl EngineShared {
             secrets_path,
             wf_fuel_limit,
             providers: Arc::new(std::sync::RwLock::new(providers)),
+            fn_inflight: Mutex::new(HashMap::new()),
+            fn_rate_limited: std::sync::atomic::AtomicU64::new(0),
         })
     }
 

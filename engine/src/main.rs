@@ -69,6 +69,12 @@ enum Cmd {
         /// snapshots, kv) this many hours after they finish. 0 = keep forever.
         #[arg(long, default_value_t = 0)]
         retain_terminal_hours: u64,
+        /// Amendment 1 (A3) — delete invocations-ledger rows and captured
+        /// function logs older than this many hours. 0 = keep forever. (Rate
+        /// limits read a 60-SECOND window, so any hours-scale setting cannot
+        /// interact with them.)
+        #[arg(long, default_value_t = 0)]
+        retain_ledger_hours: u64,
         /// v2 DR — write periodic online snapshots (keel-<millis>.db) into this
         /// directory. Consistent while running; restore = copy one back over
         /// --db and start the engine.
@@ -172,6 +178,7 @@ async fn main() -> Result<()> {
             max_guest_memory_mb,
             wf_fuel_limit,
             retain_terminal_hours,
+            retain_ledger_hours,
             backup_dir,
             backup_interval_secs,
             backup_keep,
@@ -187,6 +194,7 @@ async fn main() -> Result<()> {
                 max_guest_memory_mb,
                 wf_fuel_limit,
                 retain_terminal_hours,
+                retain_ledger_hours,
                 backup_dir,
                 backup_interval_secs,
                 backup_keep,
@@ -215,6 +223,7 @@ async fn serve(
     max_guest_memory_mb: usize,
     wf_fuel_limit: u64,
     retain_terminal_hours: u64,
+    retain_ledger_hours: u64,
     backup_dir: Option<String>,
     backup_interval_secs: u64,
     backup_keep: usize,
@@ -377,6 +386,29 @@ async fn serve(
         });
     }
 
+    // Amendment 1 (A3) — ledger retention: same shape as the workflow GC
+    // (immediate first pass, then every 60s) over invocations + fn_logs.
+    if retain_ledger_hours > 0 {
+        let shared = shared.clone();
+        std::thread::spawn(move || loop {
+            let run = || -> Result<()> {
+                let conn = db::open_conn(&shared.db_path)?;
+                let cutoff = journal::now_ms() - (retain_ledger_hours as i64) * 3_600_000;
+                let (inv, logs) = db::gc_ledger(&conn, cutoff)?;
+                if inv > 0 || logs > 0 {
+                    tracing::info!(
+                        "ledger GC removed {inv} invocation rows and {logs} log lines"
+                    );
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                tracing::error!("ledger GC pass failed: {e:#}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        });
+    }
+
     let app = Router::new()
         .route(
             "/api/modules",
@@ -454,6 +486,11 @@ async fn serve(
         .route("/partials/playground/{slug}", get(ui::submissions_partial))
         .route("/usage", get(ui::usage_page))
         .route("/partials/usage", get(ui::usage_partial))
+        // Amendment 1 (A2) — captured function/app logs: JSON read API + a
+        // drill-down page (linked from /routes and /apps rows, not a nav tab).
+        .route("/api/logs", get(api::get_logs))
+        .route("/logs", get(ui::logs_page))
+        .route("/partials/logs", get(ui::logs_partial))
         .route("/partials/schedules", get(ui::schedules_partial))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))

@@ -156,7 +156,9 @@ CREATE TABLE IF NOT EXISTS routes (
     fuel_limit   INTEGER NOT NULL DEFAULT 500000000,
     mem_limit    INTEGER NOT NULL DEFAULT 67108864,
     time_limit_ms INTEGER NOT NULL DEFAULT 5000,
-    created_at   INTEGER NOT NULL
+    created_at   INTEGER NOT NULL,
+    rate_limit   INTEGER                    -- Amendment 1: max admitted runs per
+                                            -- rolling 60s; NULL = unlimited
 );
 CREATE TABLE IF NOT EXISTS invocations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,7 +194,9 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE TABLE IF NOT EXISTS apps (
     name         TEXT PRIMARY KEY,          -- [a-z0-9-]+, validated at the API
     backend_hash TEXT REFERENCES modules(hash),  -- nullable: static-only apps allowed
-    created_at   INTEGER NOT NULL
+    created_at   INTEGER NOT NULL,
+    rate_limit   INTEGER                    -- Amendment 1: like routes.rate_limit,
+                                            -- for the app's api/* backend calls
 );
 CREATE TABLE IF NOT EXISTS assets (
     app          TEXT NOT NULL REFERENCES apps(name),
@@ -201,6 +205,26 @@ CREATE TABLE IF NOT EXISTS assets (
     bytes        BLOB NOT NULL,
     PRIMARY KEY (app, path)
 );
+
+-- Amendment 1 (A2): captured platform-api log lines from function/app runs,
+-- batch-written after each run with the ledger rowid that produced them.
+-- Host-side caps (256 lines/run, 2048 B/line, last 2000 rows per ref) live in
+-- function.rs; time-based retention is --retain-ledger-hours.
+CREATE TABLE IF NOT EXISTS fn_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind          TEXT NOT NULL,            -- 'function' | 'app'
+    ref           TEXT NOT NULL,            -- route prefix or app name
+    invocation_id INTEGER,                  -- invocations.id; NULL never happens
+                                            -- today but the ledger row can be
+                                            -- GC'd out from under old lines
+    line          TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fn_logs_ref ON fn_logs (kind, ref, id);
+
+-- Amendment 1 (A1): the rate-limit admission COUNT runs per request on
+-- limited refs — keep it off a table scan.
+CREATE INDEX IF NOT EXISTS idx_invocations_admit ON invocations (kind, ref, created_at);
 ";
 
 pub fn migrate(c: &Connection) -> Result<()> {
@@ -208,6 +232,10 @@ pub fn migrate(c: &Connection) -> Result<()> {
     // v2.1 — the ONE sanctioned way an existing table evolves in place: an
     // additive, nullable column, retrofitted onto older databases here.
     ensure_column(c, "schedules", "cron", "TEXT")?;
+    // Amendment 1 (A1) — rate limits; NULL = unlimited, so retrofitted
+    // databases keep behaving exactly as before.
+    ensure_column(c, "routes", "rate_limit", "INTEGER")?;
+    ensure_column(c, "apps", "rate_limit", "INTEGER")?;
     // v2.3 — kv went append-only (versioned). A pre-v2.3 kv table (no seq
     // column) is reshaped once: existing values become version 0, which any
     // later write out-versions. One transaction; idempotent by the seq check.
@@ -1043,6 +1071,8 @@ pub struct RouteRow {
     pub mem_limit: i64,
     pub time_limit_ms: i64,
     pub created_at: i64,
+    /// Amendment 1: max admitted runs per rolling 60s. None = unlimited.
+    pub rate_limit: Option<i64>,
 }
 
 /// Bind (or re-bind — POST is how the 5.6 gate lowers /fn/echo's fuel) a URL
@@ -1054,21 +1084,22 @@ pub fn upsert_route(
     fuel_limit: i64,
     mem_limit: i64,
     time_limit_ms: i64,
+    rate_limit: Option<i64>,
 ) -> Result<()> {
     c.execute(
-        "INSERT INTO routes (prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO routes (prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at, rate_limit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(prefix) DO UPDATE SET module_hash = excluded.module_hash,
              fuel_limit = excluded.fuel_limit, mem_limit = excluded.mem_limit,
-             time_limit_ms = excluded.time_limit_ms",
-        rusqlite::params![prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, now_ms()],
+             time_limit_ms = excluded.time_limit_ms, rate_limit = excluded.rate_limit",
+        rusqlite::params![prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, now_ms(), rate_limit],
     )?;
     Ok(())
 }
 
 pub fn list_routes(c: &Connection) -> Result<Vec<RouteRow>> {
     let mut stmt = c.prepare(
-        "SELECT prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at
+        "SELECT prefix, module_hash, fuel_limit, mem_limit, time_limit_ms, created_at, rate_limit
          FROM routes ORDER BY prefix",
     )?;
     let rows = stmt
@@ -1080,6 +1111,7 @@ pub fn list_routes(c: &Connection) -> Result<Vec<RouteRow>> {
                 mem_limit: r.get(3)?,
                 time_limit_ms: r.get(4)?,
                 created_at: r.get(5)?,
+                rate_limit: r.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1266,36 +1298,54 @@ pub fn usage_totals(c: &Connection) -> Result<Vec<(String, i64, i64)>> {
 
 /// Phase 6 — a hosted app: a name, an optional backend function, and a pile
 /// of assets. Re-POSTing a name re-binds its backend (like routes).
-pub fn upsert_app(c: &Connection, name: &str, backend_hash: Option<&str>) -> Result<()> {
+pub fn upsert_app(
+    c: &Connection,
+    name: &str,
+    backend_hash: Option<&str>,
+    rate_limit: Option<i64>,
+) -> Result<()> {
     c.execute(
-        "INSERT INTO apps (name, backend_hash, created_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(name) DO UPDATE SET backend_hash = excluded.backend_hash",
-        rusqlite::params![name, backend_hash, now_ms()],
+        "INSERT INTO apps (name, backend_hash, created_at, rate_limit) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(name) DO UPDATE SET backend_hash = excluded.backend_hash,
+             rate_limit = excluded.rate_limit",
+        rusqlite::params![name, backend_hash, now_ms(), rate_limit],
     )?;
     Ok(())
 }
 
-/// Some(backend_hash) if the app exists (inner None = static-only app).
-pub fn get_app(c: &Connection, name: &str) -> Result<Option<Option<String>>> {
+/// What the app-serving path needs to know about one app.
+pub struct AppRec {
+    /// None = static-only app.
+    pub backend_hash: Option<String>,
+    /// Amendment 1: like RouteRow.rate_limit, for the api/* backend calls.
+    pub rate_limit: Option<i64>,
+}
+
+pub fn get_app(c: &Connection, name: &str) -> Result<Option<AppRec>> {
     Ok(c.query_row(
-        "SELECT backend_hash FROM apps WHERE name = ?1",
+        "SELECT backend_hash, rate_limit FROM apps WHERE name = ?1",
         [name],
-        |r| r.get(0),
+        |r| {
+            Ok(AppRec {
+                backend_hash: r.get(0)?,
+                rate_limit: r.get(1)?,
+            })
+        },
     )
     .optional()?)
 }
 
-/// One /apps-page row: (name, backend_hash, asset_count, created_at).
-pub type AppListRow = (String, Option<String>, i64, i64);
+/// One /apps-page row: (name, backend_hash, asset_count, created_at, rate_limit).
+pub type AppListRow = (String, Option<String>, i64, i64, Option<i64>);
 
 pub fn list_apps(c: &Connection) -> Result<Vec<AppListRow>> {
     let mut stmt = c.prepare(
         "SELECT a.name, a.backend_hash,
-                (SELECT COUNT(*) FROM assets WHERE app = a.name), a.created_at
+                (SELECT COUNT(*) FROM assets WHERE app = a.name), a.created_at, a.rate_limit
          FROM apps a ORDER BY a.name",
     )?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -1339,7 +1389,8 @@ pub fn invocation_counts(c: &Connection, kind: &str) -> Result<Vec<(String, i64)
 /// The usage ledger (ext spec Task 4.3 step 6): one row per function/solver
 /// invocation, written on EVERY outcome — metering that only counts successes
 /// is fiction. fuel/peak are Options because a store that failed setup has
-/// nothing truthful to report.
+/// nothing truthful to report. Returns the new row's id (Amendment 1: fn_logs
+/// lines are tagged with the invocation that produced them).
 #[allow(clippy::too_many_arguments)] // 1:1 with the ledger columns, nothing more
 pub fn insert_invocation(
     c: &Connection,
@@ -1350,13 +1401,137 @@ pub fn insert_invocation(
     fuel_used: Option<i64>,
     peak_mem: Option<i64>,
     duration_ms: i64,
-) -> Result<()> {
+) -> Result<i64> {
     c.execute(
         "INSERT INTO invocations (kind, ref, module_hash, outcome, fuel_used, peak_mem, duration_ms, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![kind, refname, module_hash, outcome, fuel_used, peak_mem, duration_ms, now_ms()],
     )?;
-    Ok(())
+    Ok(c.last_insert_rowid())
+}
+
+// --- Amendment 1 (A1/A2/A3): rate-limit reads, fn_logs, ledger GC -----------
+
+/// Ledger rows for one ref since a cutoff — the A1 admission window count.
+/// Uses idx_invocations_admit; runs per-request on rate-limited refs only.
+pub fn recent_invocation_count(c: &Connection, kind: &str, refname: &str, since_ms: i64) -> Result<i64> {
+    Ok(c.query_row(
+        "SELECT COUNT(*) FROM invocations WHERE kind = ?1 AND ref = ?2 AND created_at > ?3",
+        rusqlite::params![kind, refname, since_ms],
+        |r| r.get(0),
+    )?)
+}
+
+/// The oldest in-window ledger row's created_at — when it ages out is the
+/// honest Retry-After for a 429. None = the window is pure in-flight runs.
+pub fn oldest_invocation_since(c: &Connection, kind: &str, refname: &str, since_ms: i64) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT MIN(created_at) FROM invocations WHERE kind = ?1 AND ref = ?2 AND created_at > ?3",
+        rusqlite::params![kind, refname, since_ms],
+        |r| r.get(0),
+    )?)
+}
+
+/// How many rows each ref keeps in fn_logs — trimmed at insert time so a
+/// chatty function can't grow the table without bound between GC passes.
+pub const FN_LOGS_KEEP_PER_REF: i64 = 2000;
+
+/// A2: batch-write one invocation's captured log lines (insert order = the
+/// order the guest logged them; AUTOINCREMENT ids preserve it), then trim the
+/// ref to its newest FN_LOGS_KEEP_PER_REF rows. One transaction.
+pub fn insert_fn_logs(
+    c: &Connection,
+    kind: &str,
+    refname: &str,
+    invocation_id: i64,
+    lines: &[String],
+) -> Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    c.execute_batch("BEGIN IMMEDIATE")?;
+    let r = (|| -> Result<()> {
+        let now = now_ms();
+        {
+            let mut stmt = c.prepare(
+                "INSERT INTO fn_logs (kind, ref, invocation_id, line, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for line in lines {
+                stmt.execute(rusqlite::params![kind, refname, invocation_id, line, now])?;
+            }
+        }
+        // Keep the newest FN_LOGS_KEEP_PER_REF rows for this ref: the subquery
+        // finds the oldest id still kept; with fewer rows it yields NULL and
+        // `id < NULL` deletes nothing.
+        c.execute(
+            "DELETE FROM fn_logs WHERE kind = ?1 AND ref = ?2 AND id <
+                 (SELECT id FROM fn_logs WHERE kind = ?1 AND ref = ?2
+                  ORDER BY id DESC LIMIT 1 OFFSET ?3)",
+            rusqlite::params![kind, refname, FN_LOGS_KEEP_PER_REF - 1],
+        )?;
+        Ok(())
+    })();
+    match r {
+        Ok(()) => c.execute_batch("COMMIT")?,
+        Err(_) => c.execute_batch("ROLLBACK")?,
+    }
+    r
+}
+
+pub struct FnLogRow {
+    pub id: i64,
+    pub invocation_id: Option<i64>,
+    pub line: String,
+    pub created_at: i64,
+}
+
+fn map_log_row(r: &rusqlite::Row) -> rusqlite::Result<FnLogRow> {
+    Ok(FnLogRow {
+        id: r.get(0)?,
+        invocation_id: r.get(1)?,
+        line: r.get(2)?,
+        created_at: r.get(3)?,
+    })
+}
+
+/// The newest `limit` lines for a ref, oldest-first (a log tail).
+pub fn tail_fn_logs(c: &Connection, kind: &str, refname: &str, limit: i64) -> Result<Vec<FnLogRow>> {
+    let mut stmt = c.prepare(
+        "SELECT id, invocation_id, line, created_at FROM fn_logs
+         WHERE kind = ?1 AND ref = ?2 ORDER BY id DESC LIMIT ?3",
+    )?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![kind, refname, limit], map_log_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Lines with id > after, oldest-first — the tail-following contract
+/// (/api/logs `after=`, the UI partial, `keel logs --follow`).
+pub fn fn_logs_after(
+    c: &Connection,
+    kind: &str,
+    refname: &str,
+    after: i64,
+    limit: i64,
+) -> Result<Vec<FnLogRow>> {
+    let mut stmt = c.prepare(
+        "SELECT id, invocation_id, line, created_at FROM fn_logs
+         WHERE kind = ?1 AND ref = ?2 AND id > ?3 ORDER BY id ASC LIMIT ?4",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![kind, refname, after, limit], map_log_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// A3: --retain-ledger-hours sweep — (invocations deleted, fn_logs deleted).
+pub fn gc_ledger(c: &Connection, cutoff_ms: i64) -> Result<(usize, usize)> {
+    let inv = c.execute("DELETE FROM invocations WHERE created_at < ?1", [cutoff_ms])?;
+    let logs = c.execute("DELETE FROM fn_logs WHERE created_at < ?1", [cutoff_ms])?;
+    Ok((inv, logs))
 }
 
 // --- Unit tests (post-review hardening) ------------------------------------------
@@ -1647,5 +1822,119 @@ mod tests {
         );
         assert_eq!(loaded[0].3, b"\0asm-two");
         assert!(get_provider_blob(&c, "h1").unwrap().is_some());
+    }
+
+    // --- Amendment 1 -----------------------------------------------------------
+
+    #[test]
+    fn rate_limit_column_retrofits_onto_old_databases() {
+        // A pre-amendment routes/apps table (no rate_limit) must gain the
+        // column via ensure_column, not fail or fork the schema.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE routes (
+                 prefix TEXT PRIMARY KEY, module_hash TEXT NOT NULL,
+                 fuel_limit INTEGER NOT NULL DEFAULT 500000000,
+                 mem_limit INTEGER NOT NULL DEFAULT 67108864,
+                 time_limit_ms INTEGER NOT NULL DEFAULT 5000,
+                 created_at INTEGER NOT NULL);
+             CREATE TABLE apps (
+                 name TEXT PRIMARY KEY, backend_hash TEXT,
+                 created_at INTEGER NOT NULL);
+             INSERT INTO routes VALUES ('/fn/old', 'h', 1, 2, 3, 4);",
+        )
+        .unwrap();
+        migrate(&c).unwrap();
+        assert!(has_column(&c, "routes", "rate_limit").unwrap());
+        assert!(has_column(&c, "apps", "rate_limit").unwrap());
+        // The pre-existing binding reads back as unlimited.
+        let rows = list_routes(&c).unwrap();
+        assert_eq!(rows[0].rate_limit, None);
+        // And the new column round-trips.
+        upsert_route(&c, "/fn/old", "h", 1, 2, 3, Some(5)).unwrap();
+        assert_eq!(list_routes(&c).unwrap()[0].rate_limit, Some(5));
+    }
+
+    #[test]
+    fn admission_window_counts_only_recent_rows_for_the_ref() {
+        let c = mem();
+        for (kind, refname, age) in [
+            ("function", "/fn/a", 0),      // in window
+            ("function", "/fn/a", 0),      // in window
+            ("function", "/fn/a", 70_000), // aged out
+            ("function", "/fn/b", 0),      // other ref
+            ("app", "/fn/a", 0),           // other kind, same ref string
+        ] {
+            let id = insert_invocation(&c, kind, refname, "h", "ok", None, None, 1).unwrap();
+            if age > 0 {
+                c.execute(
+                    "UPDATE invocations SET created_at = created_at - ?1 WHERE id = ?2",
+                    rusqlite::params![age, id],
+                )
+                .unwrap();
+            }
+        }
+        let since = now_ms() - 60_000;
+        assert_eq!(recent_invocation_count(&c, "function", "/fn/a", since).unwrap(), 2);
+        assert_eq!(recent_invocation_count(&c, "function", "/fn/b", since).unwrap(), 1);
+        assert_eq!(recent_invocation_count(&c, "function", "/fn/c", since).unwrap(), 0);
+        assert!(oldest_invocation_since(&c, "function", "/fn/a", since).unwrap().is_some());
+        assert_eq!(oldest_invocation_since(&c, "function", "/fn/c", since).unwrap(), None);
+    }
+
+    #[test]
+    fn fn_logs_tail_after_and_per_ref_trim() {
+        let c = mem();
+        let inv = insert_invocation(&c, "function", "/fn/a", "h", "ok", None, None, 1).unwrap();
+        insert_fn_logs(&c, "function", "/fn/a", inv, &["one".into(), "two".into()]).unwrap();
+        insert_fn_logs(&c, "app", "hello", inv, &["other-ref".into()]).unwrap();
+        let tail = tail_fn_logs(&c, "function", "/fn/a", 100).unwrap();
+        assert_eq!(
+            tail.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
+            vec!["one", "two"],
+            "tail is oldest-first and scoped to the ref"
+        );
+        assert_eq!(tail[0].invocation_id, Some(inv));
+        // after= returns strictly newer lines only.
+        let newer = fn_logs_after(&c, "function", "/fn/a", tail[0].id, 100).unwrap();
+        assert_eq!(newer.len(), 1);
+        assert_eq!(newer[0].line, "two");
+        // Trim: pushing past FN_LOGS_KEEP_PER_REF keeps the newest rows and
+        // never touches other refs.
+        let batch: Vec<String> = (0..500).map(|i| format!("l{i}")).collect();
+        for _ in 0..5 {
+            insert_fn_logs(&c, "function", "/fn/a", inv, &batch).unwrap();
+        }
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM fn_logs WHERE kind='function' AND ref='/fn/a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, FN_LOGS_KEEP_PER_REF);
+        let kept = tail_fn_logs(&c, "function", "/fn/a", 1).unwrap();
+        assert_eq!(kept[0].line, "l499", "the newest line survives the trim");
+        assert_eq!(tail_fn_logs(&c, "app", "hello", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn gc_ledger_sweeps_both_tables_past_the_cutoff() {
+        let c = mem();
+        let old = insert_invocation(&c, "function", "/fn/a", "h", "ok", None, None, 1).unwrap();
+        insert_fn_logs(&c, "function", "/fn/a", old, &["old-line".into()]).unwrap();
+        c.execute_batch(
+            "UPDATE invocations SET created_at = created_at - 700000;
+             UPDATE fn_logs SET created_at = created_at - 700000;",
+        )
+        .unwrap();
+        let fresh = insert_invocation(&c, "function", "/fn/a", "h", "ok", None, None, 1).unwrap();
+        insert_fn_logs(&c, "function", "/fn/a", fresh, &["fresh-line".into()]).unwrap();
+        let (inv, logs) = gc_ledger(&c, now_ms() - 600_000).unwrap();
+        assert_eq!((inv, logs), (1, 1));
+        assert_eq!(recent_invocation_count(&c, "function", "/fn/a", 0).unwrap(), 1);
+        let left = tail_fn_logs(&c, "function", "/fn/a", 10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].line, "fresh-line");
     }
 }

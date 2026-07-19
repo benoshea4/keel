@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use keel_core::db;
-use keel_core::function::{self, HttpRequest};
+use keel_core::function::{self, Admission, HttpRequest};
 use keel_core::runner::EngineShared;
 use keel_core::sandbox::{Outcome, Quota};
 
@@ -28,6 +28,26 @@ const BODY_CAP: usize = 10 * 1024 * 1024;
 
 fn json_err(status: StatusCode, body: serde_json::Value) -> Response {
     (status, axum::Json(body)).into_response()
+}
+
+/// Amendment 1 (A1): the 429. Retry-After comes from when the oldest
+/// in-window ledger row actually ages out, not a flat 60.
+fn rate_limited(limit: i64, retry_after_ms: i64) -> Response {
+    let mut resp = json_err(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({
+            "error": "rate limited",
+            "limit": limit,
+            "window_ms": function::RATE_WINDOW_MS,
+            "retry_after_ms": retry_after_ms,
+        }),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        // Ceiling seconds by hand: i64::div_ceil is still unstable.
+        HeaderValue::from(((retry_after_ms + 999) / 1000).max(1)),
+    );
+    resp
 }
 
 /// The pieces of an incoming request a function sees, extracted BEFORE the
@@ -151,7 +171,6 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
                 )
             }
         };
-        drop(conn); // invoke_handler opens its own (one per invocation, §E1)
         // Longest-prefix match ON SEGMENT BOUNDARIES: /fn/echo matches
         // /fn/echo and /fn/echo/..., never /fn/echo2 — so the guest path is
         // always "" or "/..." and the spec's "ensure leading /" case is
@@ -170,6 +189,25 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
                 json!({"error": format!("no route matches {}", raw.path)}),
             );
         };
+        // A1 — admission BEFORE the sandbox spins up (the conn is still open
+        // for the window count). The guard's Drop releases the in-flight slot
+        // after run_function has written the ledger row.
+        let admission =
+            match function::admit(&shared, &conn, "function", &route.prefix, route.rate_limit) {
+                Ok(a) => a,
+                Err(e) => {
+                    return json_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": format!("{e:#}")}),
+                    )
+                }
+            };
+        let _guard = match admission {
+            Admission::Admitted(g) => g,
+            Admission::Limited { retry_after_ms } => {
+                return rate_limited(route.rate_limit.unwrap_or(0), retry_after_ms)
+            }
+        };
         let guest_path = {
             let rest = &raw.path[route.prefix.len()..];
             if rest.is_empty() {
@@ -185,6 +223,7 @@ pub async fn dispatch_fn(State(shared): State<Arc<EngineShared>>, req: Request) 
         };
         let prefix = route.prefix.clone();
         let hash = route.module_hash.clone();
+        drop(conn); // invoke_handler opens its own (one per invocation, §E1)
         run_function(&shared, "function", &prefix, &hash, quota, raw, guest_path)
     })
     .await;
@@ -254,8 +293,8 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
                 )
             }
         };
-        let backend = match db::get_app(&conn, &name) {
-            Ok(Some(b)) => b,
+        let app = match db::get_app(&conn, &name) {
+            Ok(Some(a)) => a,
             Ok(None) => {
                 return json_err(StatusCode::NOT_FOUND, json!({"error": format!("no app '{name}'")}))
             }
@@ -291,11 +330,27 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
         }
         // 3. the backend function
         if rest == "api" || rest.starts_with("api/") {
-            let Some(hash) = backend else {
+            let Some(hash) = app.backend_hash else {
                 return json_err(
                     StatusCode::NOT_FOUND,
                     json!({"error": format!("app '{name}' has no backend function")}),
                 );
+            };
+            // A1 — same admission as /fn/*, keyed (kind 'app', app name).
+            let admission = match function::admit(&shared, &conn, "app", &name, app.rate_limit) {
+                Ok(a) => a,
+                Err(e) => {
+                    return json_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": format!("{e:#}")}),
+                    )
+                }
+            };
+            let _guard = match admission {
+                Admission::Admitted(g) => g,
+                Admission::Limited { retry_after_ms } => {
+                    return rate_limited(app.rate_limit.unwrap_or(0), retry_after_ms)
+                }
             };
             let guest_path = {
                 let p = rest.strip_prefix("api").unwrap_or("");

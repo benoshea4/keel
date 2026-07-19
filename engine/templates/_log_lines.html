@@ -1,0 +1,7 @@
+{% if lines.is_empty() %}
+<p>No log lines yet. The guest logs with the platform-api <code>log</code>
+import; lines land here after each run finishes.</p>
+{% else %}
+<pre>{% for l in lines %}{{ l.time }}  {{ l.line }}
+{% endfor %}</pre>
+{% endif %}

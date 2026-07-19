@@ -22,6 +22,8 @@
     <input id="app-name" name="name" placeholder="hello" required>
     <label for="app-backend">Backend module hash (blank = static-only)</label>
     <input id="app-backend" name="backend_hash" placeholder="sha256 hex">
+    <label for="app-rate">Backend rate limit, requests per minute (blank = unlimited)</label>
+    <input id="app-rate" name="rate_limit" inputmode="numeric">
     <button type="submit">Create app</button>
   </form>
   <script>
@@ -31,6 +33,9 @@
       if (e.detail.path === '/api/apps') {
         const p = e.detail.parameters;
         if (!p.backend_hash) delete p.backend_hash;
+        /* rate_limit must reach the API as a NUMBER — a JSON string would be
+           silently read as absent (as_i64 on a string is None). */
+        if (!p.rate_limit) delete p.rate_limit; else p.rate_limit = parseInt(p.rate_limit, 10);
         e.detail.headers['Content-Type'] = 'application/json';
         e.detail.body = JSON.stringify(p);
       }
@@ -40,16 +45,17 @@
   <h2>Hosted apps</h2>
   <table>
     <thead>
-      <tr><th>Name</th><th>Backend</th><th>Assets</th><th>Upload bundle</th><th></th></tr>
+      <tr><th>Name</th><th>Backend</th><th>Rate/min</th><th>Assets</th><th>Upload bundle</th><th></th><th></th></tr>
     </thead>
     <tbody>
       {% if apps.is_empty() %}
-      <tr><td colspan="5">No apps yet — create one above, then upload its dist/ as a zip.</td></tr>
+      <tr><td colspan="7">No apps yet — create one above, then upload its dist/ as a zip.</td></tr>
       {% endif %}
       {% for a in apps %}
       <tr>
         <td><code>{{ a.name }}</code></td>
         <td>{% if a.backend.is_empty() %}static only{% else %}<code title="{{ a.backend }}">{{ a.short_backend }}</code>{% endif %}</td>
+        <td>{{ a.rate }}</td>
         <td>{{ a.assets }}</td>
         <td>
           <form action="/api/apps/{{ a.name }}/assets" method="post" enctype="text/plain"
@@ -58,6 +64,7 @@
             <button type="submit">Upload zip</button>
           </form>
         </td>
+        <td><a href="{{ a.logs_url }}">Logs</a></td>
         <td><a href="/apps/{{ a.name }}/">Open app</a></td>
       </tr>
       {% endfor %}

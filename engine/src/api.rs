@@ -741,7 +741,57 @@ pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, 
     // asserts this never exceeds the cap.
     out.push_str("# HELP keel_active_permits Worker threads holding a --max-running permit.\n# TYPE keel_active_permits gauge\n");
     out.push_str(&format!("keel_active_permits {}\n", shared.active_permits()));
+    // Amendment 1 (A1) — 429'd admissions since boot. Deliberately NOT a
+    // ledger row (admission isn't a sandbox outcome), so it is only here.
+    out.push_str("# HELP keel_fn_rate_limited_total Data-plane requests rejected 429 by a rate limit.\n# TYPE keel_fn_rate_limited_total counter\n");
+    out.push_str(&format!(
+        "keel_fn_rate_limited_total {}\n",
+        shared.fn_rate_limited.load(std::sync::atomic::Ordering::Relaxed)
+    ));
     Ok(out)
+}
+
+/// GET /api/logs?kind=function|app&ref=<prefix-or-name>[&after=<id>][&limit=<n>]
+/// — Amendment 1 (A2). Without `after`: the newest `limit` lines, oldest-first.
+/// With `after`: lines with id > after, oldest-first (the tail-following
+/// contract used by the /logs partial and `keel logs --follow`).
+pub async fn get_logs(
+    State(shared): State<Arc<EngineShared>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiErr> {
+    let kind = q.get("kind").map(String::as_str).unwrap_or("function");
+    if kind != "function" && kind != "app" {
+        return Err(bad("kind must be 'function' or 'app'"));
+    }
+    let refname = q.get("ref").ok_or_else(|| bad("missing param: ref"))?;
+    let limit = q
+        .get("limit")
+        .map(|v| v.parse::<i64>().map_err(|_| bad("limit must be an integer")))
+        .transpose()?
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let after = q
+        .get("after")
+        .map(|v| v.parse::<i64>().map_err(|_| bad("after must be an integer")))
+        .transpose()?;
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let rows = match after {
+        Some(a) => db::fn_logs_after(&conn, kind, refname, a, limit),
+        None => db::tail_fn_logs(&conn, kind, refname, limit),
+    }
+    .map_err(internal)?;
+    let lines: Vec<Value> = rows
+        .iter()
+        .map(|l| {
+            json!({
+                "id": l.id,
+                "invocation_id": l.invocation_id,
+                "line": l.line,
+                "created_at": l.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"lines": lines})))
 }
 
 /// GET /api/workflows/{id}
@@ -809,7 +859,7 @@ pub async fn create_route(
                 continue;
             }
             match k.as_str() {
-                "fuel_limit" | "mem_limit" | "time_limit_ms" => {
+                "fuel_limit" | "mem_limit" | "time_limit_ms" | "rate_limit" => {
                     v.insert(
                         k,
                         Value::from(val.parse::<i64>().map_err(|_| bad("limits must be integers"))?),
@@ -848,16 +898,22 @@ pub async fn create_route(
     if fuel <= 0 || mem <= 0 || time_ms <= 0 {
         return Err(bad("limits must be positive"));
     }
+    // Amendment 1 (A1): admitted runs per rolling 60s; absent = unlimited.
+    let rate = body.get("rate_limit").and_then(Value::as_i64);
+    if rate.is_some_and(|r| r <= 0) {
+        return Err(bad("rate_limit must be positive (omit it for unlimited)"));
+    }
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     if !db::module_exists(&conn, hash).map_err(internal)? {
         return Err(bad(format!("unknown module hash {hash}")));
     }
-    db::upsert_route(&conn, prefix, hash, fuel, mem, time_ms).map_err(internal)?;
+    db::upsert_route(&conn, prefix, hash, fuel, mem, time_ms, rate).map_err(internal)?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "prefix": prefix, "module_hash": hash,
             "fuel_limit": fuel, "mem_limit": mem, "time_limit_ms": time_ms,
+            "rate_limit": rate,
         })),
     ))
 }
@@ -875,6 +931,7 @@ pub async fn list_routes(
                 "prefix": r.prefix, "module_hash": r.module_hash,
                 "fuel_limit": r.fuel_limit, "mem_limit": r.mem_limit,
                 "time_limit_ms": r.time_limit_ms, "created_at": r.created_at,
+                "rate_limit": r.rate_limit,
             })
         })
         .collect();
@@ -1044,16 +1101,22 @@ pub async fn create_app(
         return Err(bad("app name must be [a-z0-9-]{1,32}"));
     }
     let backend = body.get("backend_hash").and_then(Value::as_str);
+    // Amendment 1 (A1): rate-limits the app's api/* backend calls only —
+    // asset serving stays unmetered (it never enters a sandbox).
+    let rate = body.get("rate_limit").and_then(Value::as_i64);
+    if rate.is_some_and(|r| r <= 0) {
+        return Err(bad("rate_limit must be positive (omit it for unlimited)"));
+    }
     let conn = db::open_conn(&shared.db_path).map_err(internal)?;
     if let Some(h) = backend {
         if !db::module_exists(&conn, h).map_err(internal)? {
             return Err(bad(format!("unknown module hash {h}")));
         }
     }
-    db::upsert_app(&conn, name, backend).map_err(internal)?;
+    db::upsert_app(&conn, name, backend, rate).map_err(internal)?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({"name": name, "backend_hash": backend})),
+        Json(json!({"name": name, "backend_hash": backend, "rate_limit": rate})),
     ))
 }
 
