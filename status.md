@@ -21,7 +21,7 @@ verified, and every deviation from the spec and why.
   unit tests, cancel endpoint + epoch interruption, upgrade pre-flight, atomic
   wake txn, panic guard, indexes, hardened scripts (offline, self-cleaning), CI.
 
-**WHERE THINGS STAND NOW (2026-07-19, through v4.0):** everything above plus
+**WHERE THINGS STAND NOW (2026-07-19, through v4.1):** everything above plus
 v1.1–v2.6 (auth, effects, secrets, cron, DR, fleet cells, crate split,
 providers pure/effectful/registry, kv versioning, idempotency keys, OTel),
 the ENTIRE micro-cloud extension v2.7–v3.0 (serverless functions, the judge,
@@ -32,15 +32,17 @@ compile cache, data-plane deadline; ETag/304, API+CLI symmetry, favicon,
 percentiles), Amendment 2 as v3.5 (per-ref config + durable kv, WIT 0.8.0),
 and Amendment 3 as v4.0 — THE ECOSYSTEM RELEASE: unmodified wasi:http/proxy
 components on the same /fn routes, wasi:keyvalue on the same store, outbound
-as an operator grant. **Suite = 24 gates / 53 unit tests, all in CI. Twelve
-tagged releases (v1.0–v4.0), each on a CI-verified SHA with 6 verified
-assets.** The full story: sections A–F, N (micro-cloud), O (Amendment 1),
-P (the audit), Q (v3.3), R (the approved v3.4/v3.5/v4.0 plan + records +
-ship chain), **S (the v4.1 audit + hardening slice: 13 confirmed findings
-FIXED in-tree — incl. a P1 proxy-outbound permit-exhaustion — green on
-build/clippy/54 unit tests/4 covering gates, NOT yet a tagged release; plus
-the expanded founder shelf incl. quantum-as-a-provider + the agent runtime)**.
-The remaining shelf is in §R's tail and §S — all demand-driven.
+as an operator grant. Most recently **v4.1 — the audit + hardening release:
+the whole v3.3→v4.0 diff re-reviewed angry, 13 confirmed fixes (headlined by a
+P1 proxy-outbound permit-exhaustion bound), no new surface.** **Suite = 25
+gates / 58 unit tests, all in CI. Thirteen tagged releases (v1.0–v4.1), each on
+a CI-verified SHA with 6 verified assets.** The full story: sections A–F, N
+(micro-cloud), O (Amendment 1), P (the audit), Q (v3.3), R (the approved
+v3.4/v3.5/v4.0 plan + records + ship chain), **S (v4.1 — the audit + hardening
+release: 13 confirmed fixes, the 25th gate accept_hardv41, SHIPPED and tagged
+on a CI-verified SHA; §S.4 is the ship record; plus the expanded founder shelf
+incl. quantum-as-a-provider + the agent runtime)**. The remaining shelf is in
+§R's tail and §S — all demand-driven.
 
 Build/run cheatsheet (run from this directory, `keel/`):
 
@@ -75,7 +77,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_polish.sh                          # must print POLISH PASS (ETag/CLI symmetry/favicon/percentiles, v3.4)
 ./scripts/accept_functions2.sh                      # must print FUNCTIONS2 PASS (config + durable kv, WIT 0.8.0, v3.5)
 ./scripts/accept_ecosystem.sh                       # must print ECOSYSTEM PASS (wasi:http/proxy + wasi:keyvalue, v4.0)
-./scripts/accept_hardv41.sh                          # must print HARDV41 PASS (§S audit fixes: proxy-outbound bound, metrics escaping, config cap; needs a free :18080)
+./scripts/accept_hardv41.sh                          # must print HARDV41 PASS (v4.1 audit fixes: proxy-outbound bound, metrics escaping, config cap, forged-header zip bomb, run --timeout 0; needs a free :18080)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -1299,10 +1301,11 @@ S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
    HANGING upstream is bounded to ~time_ms and the permit frees, single AND
    under a cap-saturating flood), S-FIX-5 (a quote in a `ref` yields escaped
    /metrics), S-FIX-8 (the config cap holds under an 8-way concurrent burst).
-   This is an audit slice, NOT a tagged release: the FULL 25-gate run + gate
-   coverage for the last two fixes (S-FIX-3 forged-header bomb needs a crafted
-   zip fixture; S-FIX-10 --timeout 0 is CLI-loop logic) must land before any
-   v4.1 tag (see S.3).
+   NOW SHIPPED: the launch pass (2026-07-19) closed the last two gate gaps
+   (S-FIX-3 forged-header bomb via scripts/forge_zipbomb.py; S-FIX-10 --timeout 0
+   against the parking approval guest), wired accept_hardv41 into CI as the 25th
+   gate, and cut the v4.1 tag on a CI-verified SHA — see S.3 (the launch-pass
+   record) and S.4 (the ship record).
 
    ANGRY REVIEWER — CONFIRMED + FIXED (severity-ordered):
    - [x] S-FIX-1 (P1, availability — the headline): PROXY OUTBOUND HAS NO
@@ -1698,7 +1701,7 @@ S. **v4.1 audit + hardening — the whole v3.3→v4.0 diff re-reviewed, angry
 
 ---
 
-## What exists (file map, current through v4.0)
+## What exists (file map, current through v4.1)
 
 ```
 keel/
@@ -1751,10 +1754,11 @@ keel/
 │                            (cargo-component needs explicit target.dependencies entries)
 ├── providers/               greet (pure), relay (effectful) sample providers
 ├── apps/hello/              Leptos 0.7 CSR demo app (trunk; public_url="./" REQUIRED)
-├── .github/workflows/       ci.yml (clippy -D warnings + unit tests + all 24 gates),
+├── .github/workflows/       ci.yml (clippy -D warnings + unit tests + all 25 gates),
 │                            release.yml (v* tag → 3 platform tarballs + sha256s, by release ID)
-└── scripts/                 24 acceptance/smoke gates in CI + accept_hardv41.sh (§S, the
-                             audit-fix gate — passes locally, joins CI at v4.1 tag time) +
+└── scripts/                 25 acceptance/smoke gates in CI incl. accept_hardv41.sh (v4.1,
+                             the audit-fix gate — the 25th, after accept_ecosystem) +
+                             forge_zipbomb.py (S-FIX-3 forged-header fixture) +
                              hang_stub.py (its hanging upstream) + stub/ (offline http)
 ```
 
