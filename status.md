@@ -730,9 +730,17 @@ O. **Amendment 1 — operating the public plane + the CLI (v3.1/v3.2, started
    - [x] O.5 --retain-ledger-hours GC + fleet knob
    - [x] O.6 UI: rate cols on /routes + /apps, /logs page + partial + row links
    - [x] O.7 accept_operate.sh ×2 from clean + angry review + docs + FULL suite
-   - [ ] O.8 ship v3.1: push, CI green, tag on CI SHA, release + 6 assets
+   - [x] O.8 ship v3.1: push, CI green (f8cf2f0), tag on CI SHA, release + 6 assets VERIFIED
    - [x] O.9 CLI: client.rs (deploy/bind/run/logs) + accept_cli.sh ×2 + angry review
-   - [ ] O.10 ship v3.2 same ritual; update memory + ROADMAP + demo instance
+   - [x] O.10 ship v3.2 same ritual; update memory + ROADMAP + demo instance
+   - SHIPPED: v3.1 (tag on CI-green f8cf2f0) and v3.2 (tag on CI-green
+     92caf8e), both releases with hand-written notes and 6 assets VERIFIED
+     via the list endpoint. AMENDMENT 1 IS COMPLETE — suite is 20 gates /
+     42 unit tests, all in CI. Further work is demand-driven only (ROADMAP
+     Next: host-kv, replication, remaining stretch: wasi:http/proxy compat,
+     wasi:keyvalue). The user's demo instance runs the v3.2 binary on
+     demo.db (retrofitted in place): /fn/echo bound at rate 120 via
+     `keel bind`, logs seeded, hello app + playground + usage all live.
 
    V3.2 RECORD (2026-07-19):
    - **client.rs**: Conn (clap-flattened --server/KEEL_SERVER +
