@@ -294,7 +294,94 @@ pub fn invoke_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_line;
+    use std::sync::Arc;
+
+    use super::{admit, truncate_line, Admission, RATE_WINDOW_MS};
+    use crate::db;
+
+    /// v3.4 (R.4): admit()'s ledger+inflight interplay, unit-level at last —
+    /// the §P hedge ("if EngineShared is too heavy…") died with v3.3's
+    /// testutil. Rows are seeded through the real insert path and backdated
+    /// with direct SQL, exactly how the operate gate manipulates the window.
+    fn seeded(name: &str) -> (Arc<crate::runner::EngineShared>, rusqlite::Connection) {
+        let shared = Arc::new(crate::runner::testutil::shared(name, 8));
+        let conn = db::open_conn(&shared.db_path).expect("open scratch db");
+        (shared, conn)
+    }
+
+    fn ledger_row(conn: &rusqlite::Connection, kind: &str, refname: &str) {
+        db::insert_invocation(conn, kind, refname, "hash", "ok", Some(1), Some(1), 1)
+            .expect("seed invocation");
+    }
+
+    #[test]
+    fn admit_unlimited_takes_no_slot() {
+        let (shared, conn) = seeded("admit-unlimited");
+        for _ in 0..3 {
+            match admit(&shared, &conn, "function", "/fn/u", None).unwrap() {
+                Admission::Admitted(_g) => {}
+                Admission::Limited { .. } => panic!("unlimited ref was limited"),
+            }
+        }
+        assert!(shared.fn_inflight.lock().unwrap().is_empty(), "no slots for unlimited refs");
+    }
+
+    #[test]
+    fn admit_counts_ledger_plus_inflight_and_guard_drop_frees() {
+        let (shared, conn) = seeded("admit-count");
+        ledger_row(&conn, "function", "/fn/c"); // recent = 1
+        let g1 = match admit(&shared, &conn, "function", "/fn/c", Some(2)).unwrap() {
+            Admission::Admitted(g) => g, // 1 recent + 0 inflight < 2
+            Admission::Limited { .. } => panic!("first admission must pass"),
+        };
+        match admit(&shared, &conn, "function", "/fn/c", Some(2)).unwrap() {
+            Admission::Limited { retry_after_ms } => {
+                assert!((1..=RATE_WINDOW_MS).contains(&retry_after_ms), "{retry_after_ms}");
+            }
+            Admission::Admitted(_) => panic!("1 recent + 1 inflight must hit limit 2"),
+        }
+        drop(g1); // the guard IS the release path (engine faults, panics)
+        assert!(shared.fn_inflight.lock().unwrap().is_empty(), "drop must clear the slot");
+        match admit(&shared, &conn, "function", "/fn/c", Some(2)).unwrap() {
+            Admission::Admitted(_g) => {}
+            Admission::Limited { .. } => panic!("slot freed — must admit again"),
+        }
+    }
+
+    #[test]
+    fn admit_inflight_only_window_says_retry_shortly() {
+        let (shared, conn) = seeded("admit-inflight");
+        let _g = match admit(&shared, &conn, "function", "/fn/i", Some(1)).unwrap() {
+            Admission::Admitted(g) => g,
+            Admission::Limited { .. } => panic!("empty window must admit"),
+        };
+        match admit(&shared, &conn, "function", "/fn/i", Some(1)).unwrap() {
+            // No ledger row to age out — the honest answer is the 1s floor.
+            Admission::Limited { retry_after_ms } => assert_eq!(retry_after_ms, 1000),
+            Admission::Admitted(_) => panic!("inflight slot must count toward the limit"),
+        }
+    }
+
+    #[test]
+    fn admit_frees_when_the_window_ages_out() {
+        let (shared, conn) = seeded("admit-age");
+        ledger_row(&conn, "function", "/fn/a");
+        match admit(&shared, &conn, "function", "/fn/a", Some(1)).unwrap() {
+            Admission::Limited { retry_after_ms } => {
+                assert!((1..=RATE_WINDOW_MS).contains(&retry_after_ms));
+            }
+            Admission::Admitted(_) => panic!("full window must limit"),
+        }
+        conn.execute(
+            "UPDATE invocations SET created_at = created_at - ?1",
+            [RATE_WINDOW_MS + 1000],
+        )
+        .unwrap();
+        match admit(&shared, &conn, "function", "/fn/a", Some(1)).unwrap() {
+            Admission::Admitted(_g) => {}
+            Admission::Limited { .. } => panic!("aged-out window must admit"),
+        }
+    }
 
     #[test]
     fn truncate_line_respects_utf8_boundaries() {

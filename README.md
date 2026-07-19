@@ -88,6 +88,9 @@ keel bind /fn/echo echo_fn.wasm --rate 600     # upload + bind a function (600 r
 keel deploy dist/ --name hello --backend starter_fn.wasm   # directory -> running app
 keel logs /fn/echo --follow                    # tail what the function logs
 keel run counter.wasm --input '{"target":3}'   # durable workflow, watched to completion
+keel ls                                        # routes + apps + schedules, one screen (v3.4)
+keel unbind /fn/echo                           # remove a binding; `keel apps rm <name>` for apps
+keel run big.wasm --timeout 60                 # stop watching after 60s (exit 2; it keeps running)
 ```
 
 Prove durability to yourself: start the demo workflow, `kill -9` the engine during its

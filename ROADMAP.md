@@ -8,6 +8,7 @@ definition of done) and runs in CI.
 
 | Version | What | Proof |
 |---|---|---|
+| v3.4 | **Polish** (status.md §R.1–R.5): conditional GETs on app assets (per-asset sha256 `ETag`, `If-None-Match` → 304, hash-named files `max-age=1y immutable`, `index.html` stays `no-store` — app loads go ~1 MB → ~1 KB); API symmetry `GET /api/apps` + `DELETE /api/apps/{name}` (cascades assets, one txn); CLI symmetry `keel ls` / `unbind` / `apps rm` / `run --timeout` (exit 2, workflow keeps running); embedded `/favicon.ico` (auth-allowlisted); latency percentiles p50/p95/p99 per ref from the ledger's `duration_ms` (`keel_fn_duration_ms` in /metrics + a Latency-by-ref table on /usage); admit() unit tests (the §P P-FIX-9 hedge closed) | `accept_polish.sh` |
 | v3.3 | **Hardening the public plane** (status.md §P, the v3.2 audit's P0/P1 fixes): engine faults answer a generic `{"error":"internal error"}` publicly with the full chain in the engine log (tokenless callers get no hashes/paths/compiler output); `--max-fn-concurrent` global sandbox-execution cap (503 + `Retry-After` beyond it, `keel_fn_over_capacity_total`, asset serving takes no slot, judge runs serialize on a 1-permit queue instead of stacking blocking threads); hash-first compiled-component lookup (the module BLOB is read only on a compile miss) behind a bounded LRU (`--max-compiled-modules`, `keel_compiled_cache_size`, compile outside the cache lock); `--data-timeout-secs` whole-request deadline on `/fn` + `/apps` (408 kills slow-drip bodies). No WIT change, no API change beyond flags | `accept_harden.sh` |
 | v3.2 | **The client CLI** ([SPEC-AMENDMENT-1.md](SPEC-AMENDMENT-1.md) A4, the curl-free platform): `keel deploy <dir>` (directory → running app: in-memory zip, dot-files/symlinks skipped, backend upload, upsert end to end), `keel bind <prefix> <wasm>` (upload + bind with all quotas incl. `--rate`), `keel run <wasm\|hash>` (durable workflow watched to a terminal state; exit 0/1), `keel logs <ref> [--follow]` (kind inferred). Thin clients of the HTTP API — `--server`/`KEEL_SERVER`, `--token`/`KEEL_API_TOKEN` (the server's own variable) | `accept_cli.sh` |
 | v3.1 | **Operating the public plane** ([SPEC-AMENDMENT-1.md](SPEC-AMENDMENT-1.md) A1–A3, the stretch item "per-route rate limits off the ledger" done with the discipline it asked for): per-route AND per-app `rate_limit` (max admitted runs per rolling 60 s, counted off the invocations ledger + an in-flight term — EXACT under concurrent bursts, restart-safe by construction; 429 + honest `Retry-After`; `keel_fn_rate_limited_total`); captured function logs (platform-api `log` → `fn_logs`, 256/invocation · 2 KiB/line · newest 2000/ref, `GET /api/logs` with `after=` tailing, `/logs` drill-down page); `--retain-ledger-hours` GC. No WIT change | `accept_operate.sh` |
@@ -49,11 +50,6 @@ and its stretch item "per-route rate limits off the ledger" shipped as v3.1
 (Amendment 1). Everything from here is demand-driven; the refined sequence
 lives in status.md §R:
 
-- **v3.4 "polish"** — ETag/304 asset caching (hash-named files immutable,
-  index.html stays no-store), CLI symmetry (`keel ls` / `unbind` /
-  `apps rm` + the missing `DELETE /api/apps/{name}`, `run --timeout`),
-  embedded favicon, admit() unit tests, latency percentiles from the
-  ledger's `duration_ms`. No WIT change.
 - **v3.5 "functions grow up"** — Amendment 2 (spec first): platform-api
   0.8.0 adds `config-get` (per-route config/secrets — the API-key unlock)
   and `kv-get`/`kv-set` (durable per-ref state, hard caps). One WIT bump,

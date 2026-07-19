@@ -12,6 +12,21 @@
   </tbody>
 </table>
 
+{# v3.4 (R.5): the ledger's duration_ms, folded to percentiles — the same
+   numbers /metrics exports as keel_fn_duration_ms. #}
+<h2>Latency by ref</h2>
+<table>
+  <thead><tr><th>Kind</th><th>Ref</th><th>p50 ms</th><th>p95 ms</th><th>p99 ms</th></tr></thead>
+  <tbody>
+    {% if lat.is_empty() %}
+    <tr><td colspan="5">No invocations yet.</td></tr>
+    {% endif %}
+    {% for l in lat %}
+    <tr><td>{{ l.kind }}</td><td><code>{{ l.refname }}</code></td><td>{{ l.p50 }}</td><td>{{ l.p95 }}</td><td>{{ l.p99 }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
 <h2>Last 100 invocations</h2>
 <table>
   <thead>

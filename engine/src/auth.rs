@@ -72,7 +72,7 @@ pub async fn require_auth(
     let path = req.uri().path();
     // Assets are static and cacheable; /login and /logout must be reachable
     // logged-out or nobody could ever log in.
-    if path.starts_with("/assets/") || path == "/login" || path == "/logout" {
+    if path.starts_with("/assets/") || path == "/login" || path == "/logout" || path == "/favicon.ico" {
         return next.run(req).await;
     }
     let header_ok = bearer(&req).is_some_and(|t| token_ok(&t, expected));

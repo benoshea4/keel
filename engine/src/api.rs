@@ -760,6 +760,17 @@ pub async fn metrics(State(shared): State<Arc<EngineShared>>) -> Result<String, 
         "keel_compiled_cache_size {}\n",
         shared.compiled_cache_size()
     ));
+    // v3.4 (R.5) — latency percentiles the ledger already contained: nearest-
+    // rank over duration_ms per (kind, ref). Gauges, not histograms — the raw
+    // rows ARE the histogram, re-derived per scrape.
+    out.push_str("# HELP keel_fn_duration_ms Invocation duration percentiles per ref (nearest-rank from the ledger).\n# TYPE keel_fn_duration_ms gauge\n");
+    for (kind, refname, p50, p95, p99) in db::duration_percentiles(&conn).map_err(internal)? {
+        for (q, v) in [("0.5", p50), ("0.95", p95), ("0.99", p99)] {
+            out.push_str(&format!(
+                "keel_fn_duration_ms{{kind=\"{kind}\",ref=\"{refname}\",quantile=\"{q}\"}} {v}\n"
+            ));
+        }
+    }
     Ok(out)
 }
 
@@ -1153,6 +1164,39 @@ pub async fn create_app(
 /// entries (`..` or absolute paths) are a 400 and nothing is stored from the
 /// bundle before them; directories are skipped; `.wasm`/`.js` content types
 /// are forced (browsers refuse WASM served with the wrong type).
+/// GET /api/apps — v3.4 (R.2): the OTHER API hole `keel ls` surfaced — apps
+/// could be created and served but never listed except by the HTML page.
+pub async fn list_apps(State(shared): State<Arc<EngineShared>>) -> Result<Json<Value>, ApiErr> {
+    let conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    let rows = db::list_apps(&conn).map_err(internal)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|(name, backend, assets, created_at, rate_limit)| {
+            json!({
+                "name": name, "backend_hash": backend, "assets": assets,
+                "created_at": created_at, "rate_limit": rate_limit,
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
+}
+
+/// DELETE /api/apps/{name} → 204 / 404 — v3.4 (R.2): the API hole the CLI
+/// surfaced (routes have had DELETE since phase 4; apps never did). App row +
+/// assets go in ONE transaction; ledger rows and captured logs remain — they
+/// are history, owned by --retain-ledger-hours.
+pub async fn delete_app(
+    State(shared): State<Arc<EngineShared>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiErr> {
+    let mut conn = db::open_conn(&shared.db_path).map_err(internal)?;
+    if db::delete_app(&mut conn, &name).map_err(internal)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("no app '{name}'")))
+    }
+}
+
 pub async fn upload_assets(
     State(shared): State<Arc<EngineShared>>,
     Path(name): Path<String>,

@@ -203,6 +203,9 @@ CREATE TABLE IF NOT EXISTS assets (
     path         TEXT NOT NULL,             -- 'index.html', 'pkg/app_bg.wasm', ...
     content_type TEXT NOT NULL,
     bytes        BLOB NOT NULL,
+    etag         TEXT,                      -- v3.4 (R.1): sha256 hex of bytes, set at
+                                            -- upsert; NULL only on pre-v3.4 rows
+                                            -- (re-upload heals them)
     PRIMARY KEY (app, path)
 );
 
@@ -236,6 +239,8 @@ pub fn migrate(c: &Connection) -> Result<()> {
     // databases keep behaving exactly as before.
     ensure_column(c, "routes", "rate_limit", "INTEGER")?;
     ensure_column(c, "apps", "rate_limit", "INTEGER")?;
+    // v3.4 (R.1) — conditional-GET support on stored assets.
+    ensure_column(c, "assets", "etag", "TEXT")?;
     // v2.3 — kv went append-only (versioned). A pre-v2.3 kv table (no seq
     // column) is reshaped once: existing values become version 0, which any
     // later write out-versions. One transaction; idempotent by the seq check.
@@ -1357,23 +1362,75 @@ pub fn upsert_asset(
     content_type: &str,
     bytes: &[u8],
 ) -> Result<()> {
+    // v3.4 (R.1): the etag is computed HERE so no upload path can forget it —
+    // sha256 of the bytes, which is also what makes re-uploads change it.
+    let etag = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(bytes))
+    };
     c.execute(
-        "INSERT INTO assets (app, path, content_type, bytes) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO assets (app, path, content_type, bytes, etag) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(app, path) DO UPDATE SET content_type = excluded.content_type,
-             bytes = excluded.bytes",
-        rusqlite::params![app, path, content_type, bytes],
+             bytes = excluded.bytes, etag = excluded.etag",
+        rusqlite::params![app, path, content_type, bytes, etag],
     )?;
     Ok(())
 }
 
-/// (content_type, bytes), or None.
-pub fn get_asset(c: &Connection, app: &str, path: &str) -> Result<Option<(String, Vec<u8>)>> {
+/// (content_type, bytes, etag) — etag is NULL only on rows written before
+/// v3.4 (serving degrades to unconditional 200s until re-upload).
+pub type AssetRow = (String, Vec<u8>, Option<String>);
+
+pub fn get_asset(c: &Connection, app: &str, path: &str) -> Result<Option<AssetRow>> {
     Ok(c.query_row(
-        "SELECT content_type, bytes FROM assets WHERE app = ?1 AND path = ?2",
+        "SELECT content_type, bytes, etag FROM assets WHERE app = ?1 AND path = ?2",
         rusqlite::params![app, path],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
     .optional()?)
+}
+
+/// v3.4 (R.2) — delete an app AND its assets in one transaction (routes have
+/// had DELETE since phase 4; apps never did). Ledger rows and captured logs
+/// deliberately REMAIN — they are history, owned by --retain-ledger-hours.
+pub fn delete_app(c: &mut Connection, name: &str) -> Result<bool> {
+    let tx = c.transaction()?;
+    tx.execute("DELETE FROM assets WHERE app = ?1", [name])?;
+    let n = tx.execute("DELETE FROM apps WHERE name = ?1", [name])?;
+    tx.commit()?;
+    Ok(n > 0)
+}
+
+/// (kind, ref, p50, p95, p99) of duration_ms.
+pub type LatencyRow = (String, String, i64, i64, i64);
+
+/// v3.4 (R.5) — p50/p95/p99 of duration_ms per (kind, ref), nearest-rank on
+/// the sorted set via OFFSET. Ref counts are small; three indexed lookups per
+/// ref beat a hand-rolled histogram, and there is nothing to mis-bucket.
+pub fn duration_percentiles(c: &Connection) -> Result<Vec<LatencyRow>> {
+    let mut refs: Vec<(String, String, i64)> = Vec::new();
+    {
+        let mut stmt =
+            c.prepare("SELECT kind, ref, COUNT(*) FROM invocations GROUP BY kind, ref ORDER BY kind, ref")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for row in rows {
+            refs.push(row?);
+        }
+    }
+    let mut out = Vec::new();
+    for (kind, refname, n) in refs {
+        let q = |p: f64| -> Result<i64> {
+            let off = ((p * (n - 1) as f64).round() as i64).clamp(0, n - 1);
+            Ok(c.query_row(
+                "SELECT duration_ms FROM invocations WHERE kind = ?1 AND ref = ?2
+                 ORDER BY duration_ms LIMIT 1 OFFSET ?3",
+                rusqlite::params![kind, refname, off],
+                |r| r.get(0),
+            )?)
+        };
+        out.push((kind.clone(), refname.clone(), q(0.50)?, q(0.95)?, q(0.99)?));
+    }
+    Ok(out)
 }
 
 /// Ledger rollup for the routes page: (ref, row count) for one kind.
@@ -1936,5 +1993,59 @@ mod tests {
         let left = tail_fn_logs(&c, "function", "/fn/a", 10).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].line, "fresh-line");
+    }
+
+    #[test]
+    fn duration_percentiles_nearest_rank() {
+        // v3.4 (R.5): durations 10..=100 by tens → nearest-rank offsets are
+        // knowable by hand: p50 = idx round(0.5*9)=5 (60ms wait: values
+        // 10,20,...,100; idx 5 → 60? offset 5 → the 6th value = 60), p95 =
+        // round(0.95*9)=9 → 100, p99 → 100.
+        let c = mem();
+        for d in (1..=10).map(|i| i * 10) {
+            insert_invocation(&c, "function", "/fn/p", "h", "ok", None, None, d).unwrap();
+        }
+        insert_invocation(&c, "app", "solo", "h", "ok", None, None, 7).unwrap();
+        let rows = duration_percentiles(&c).unwrap();
+        assert_eq!(rows.len(), 2);
+        let solo = rows.iter().find(|r| r.0 == "app").unwrap();
+        assert_eq!((solo.2, solo.3, solo.4), (7, 7, 7), "n=1: every quantile IS the value");
+        let p = rows.iter().find(|r| r.0 == "function").unwrap();
+        assert_eq!((p.2, p.3, p.4), (60, 100, 100));
+    }
+
+    #[test]
+    fn asset_etag_set_on_upsert_and_changes_with_bytes() {
+        // v3.4 (R.1): the etag is the content hash — same bytes, same tag;
+        // re-upload with new bytes MUST move it (that is the whole 304 story).
+        let c = mem();
+        c.execute(
+            "INSERT INTO apps (name, created_at) VALUES ('a', 0)",
+            [],
+        )
+        .unwrap();
+        upsert_asset(&c, "a", "x.js", "text/javascript", b"one").unwrap();
+        let (_, _, t1) = get_asset(&c, "a", "x.js").unwrap().unwrap();
+        let t1 = t1.expect("etag set on insert");
+        upsert_asset(&c, "a", "x.js", "text/javascript", b"one").unwrap();
+        let (_, _, t2) = get_asset(&c, "a", "x.js").unwrap().unwrap();
+        assert_eq!(Some(t1.clone()), t2, "same bytes, same etag");
+        upsert_asset(&c, "a", "x.js", "text/javascript", b"two").unwrap();
+        let (_, bytes, t3) = get_asset(&c, "a", "x.js").unwrap().unwrap();
+        assert_eq!(bytes, b"two");
+        assert_ne!(Some(t1), t3, "new bytes must move the etag");
+    }
+
+    #[test]
+    fn delete_app_cascades_assets_in_one_txn() {
+        // v3.4 (R.2)
+        let mut c = mem();
+        c.execute("INSERT INTO apps (name, created_at) VALUES ('gone', 0)", []).unwrap();
+        upsert_asset(&c, "gone", "index.html", "text/html", b"<h1>").unwrap();
+        assert!(delete_app(&mut c, "gone").unwrap());
+        assert!(get_asset(&c, "gone", "index.html").unwrap().is_none());
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM apps", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        assert!(!delete_app(&mut c, "gone").unwrap(), "second delete reports missing");
     }
 }

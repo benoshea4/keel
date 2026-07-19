@@ -51,6 +51,7 @@ cargo test --release -p keel-engine                 # unit tests (in-memory SQLi
 ./scripts/accept_operate.sh                         # must print OPERATE PASS (rate limits/logs/retention, v3.1)
 ./scripts/accept_cli.sh                             # must print CLI PASS (client verbs, v3.2)
 ./scripts/accept_harden.sh                          # must print HARDEN PASS (caps/sanitized faults/timeouts, v3.3)
+./scripts/accept_polish.sh                          # must print POLISH PASS (ETag/CLI symmetry/favicon/percentiles, v3.4)
 ```
 
 UI: `http://127.0.0.1:8080/` (dashboard), `/modules` (upload + start), each
@@ -1029,12 +1030,18 @@ Q. **v3.3 "harden" — P-FIX-1..5 built and shipped (2026-07-19).** The user's
 R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
    §P stands as written (append-only; its P-FIX-1..5 are ticked and §Q is
    their record). This section refines the REMAINING shelf with what the
-   v3.3 build taught. Everything below stays demand-driven: nothing starts
-   without the user's word.
+   v3.3 build taught.
+
+   STATUS: APPROVED 2026-07-19 — the user's word: "do 3.4 and 3.5 and
+   beyond". The sequence below is live, built in order with the full
+   discipline per stage (angry review → gate ×2 from clean → whole suite →
+   ship: CI-verified tag, hand-written notes, 6 assets verified). v3.4
+   IN BUILD; v3.5 starts with SPEC-AMENDMENT-2.md; v4.0 starts with
+   SPEC-AMENDMENT-3.md.
 
    v3.4 "polish" — P-FIX-6..9 + P-IDEA-6, one gate (accept_polish.sh),
    no WIT change, additive schema only:
-   - [ ] R.1 (P-FIX-6) asset caching: store sha256 per asset at upload
+   - [x] R.1 (P-FIX-6) asset caching: store sha256 per asset at upload
      (assets table gains an `etag` column via ensure_column — the
      schedules.cron retrofit precedent); serve_asset sends ETag and
      honors If-None-Match → 304 empty body; Cache-Control splits:
@@ -1043,31 +1050,53 @@ R. **Next steps after v3.3 — the refined plan (2026-07-19, on user request).**
      upgrade lever — never cache the entry point). Gate: GET carries
      ETag → conditional GET 304s → re-upload changes the ETag → 200
      again → index.html stays no-store. Apps go ~1 MB/load → ~1 KB.
-   - [ ] R.2 (P-FIX-7) CLI symmetry + the missing API: FIRST the API
+   - [x] R.2 (P-FIX-7) CLI symmetry + the missing API: FIRST the API
      hole — DELETE /api/apps/{name} (app row + assets cascaded in ONE
      txn; 404 honest; routes already have DELETE, apps have none).
      Then the verbs, thin clients per A4: `keel ls` (routes + apps +
      schedules, one screen), `keel unbind <prefix>`, `keel apps rm
      <name>`, and `keel run --timeout <secs>` (exit 2 on deadline —
      scripts need a bound; today a wedged workflow wedges the CLI).
-   - [ ] R.3 (P-FIX-8) favicon: one embedded file served like
+   - [x] R.3 (P-FIX-8) favicon: one embedded file served like
      htmx.min.js (build.rs-asserted), route allowlisted in auth like
      /assets/*. Kills a 404 per page view.
-   - [ ] R.4 (P-FIX-9) admit() unit tests — UNBLOCKED by v3.3: §P hedged
+   - [x] R.4 (P-FIX-9) admit() unit tests — UNBLOCKED by v3.3: §P hedged
      "if EngineShared construction is too heavy, extract the core"; the
      v3.3 runner.rs tests settled it (test_shared builds a REAL
      EngineShared on a scratch db, cheaply). Reuse that helper: seed
      invocations rows at the window edge, assert recent+inflight vs
      limit boundaries, AdmitGuard Drop releases the slot, Limited's
      retry_after_ms derives from the oldest in-window row (None → 1000).
-   - [ ] R.5 (P-IDEA-6) latency percentiles: p50/p95/p99 per ref from
+   - [x] R.5 (P-IDEA-6) latency percentiles: p50/p95/p99 per ref from
      invocations.duration_ms — small N per ref, compute in SQL
      (ORDER BY duration_ms + LIMIT/OFFSET index math; no dependency,
      no histogram buckets to mis-size) — exposed as
      keel_fn_duration_ms{ref="...",quantile="..."} gauges; /usage gains
      three columns. Metrics first; sparklines only if asked.
    - Optional while in there (only if trivial): keel_judge_queue depth
-     gauge — v3.3 made the queue real, a gauge makes it visible.
+     gauge — SKIPPED (not trivial enough to be free: the semaphore has no
+     waiter count without extra state; revisit on demand).
+
+   V3.4 RECORD (2026-07-19): all five R-items landed in one pass. Deltas
+   from the plan, discovered while building: (a) `keel ls` surfaced a
+   SECOND API hole — apps had no GET either; GET /api/apps added alongside
+   DELETE (both documented in docs/api.md). (b) hash_named() also treats a
+   BARE 12+-hex stem as content-named (a file literally named by its hash)
+   — comment matches code. (c) favicon is a real committed 16×16 ICO
+   (generated once by hand-rolled struct-packed BMP-in-ICO; SVG probing is
+   browser-dependent, ICO isn't), served at /favicon.ico, auth-allowlisted,
+   build.rs-asserted like htmx. (d) If-None-Match matching is a contains-
+   check on the 64-hex etag (quote/W\-prefix agnostic; can't false-match);
+   `If-None-Match: *` deliberately not special-cased (a PUT guard, not a
+   GET reality). (e) admit() tests seed rows through the REAL
+   insert_invocation and manipulate the window with direct UPDATEs — the
+   operate-gate technique at unit level; runner::testutil::shared is the
+   cfg(test) helper both test mods share. Suite = 22 gates / 51 unit tests
+   (7 new: 4 admit, percentiles nearest-rank, etag-moves-with-bytes,
+   delete-app cascade). Gate accept_polish.sh runs on a TOKENED engine so
+   the favicon-allowlist claim is real; run --timeout proven exit-2 against
+   a parked approval workflow that KEEPS RUNNING after the CLI stops
+   watching (asserted via the API).
 
    v3.5 "functions grow up" — SPEC-AMENDMENT-2.md FIRST (the Amendment 1
    in-repo discipline), then code. ONE WIT bump (0.7.0 → 0.8.0 — the

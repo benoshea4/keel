@@ -186,7 +186,7 @@ enum Cmd {
         conn: client::Conn,
     },
     /// Start a durable workflow and watch it to a terminal state (exit 0 on
-    /// completed, 1 on failed). A .wasm path is uploaded first.
+    /// completed, 1 on failed, 2 on --timeout). A .wasm path is uploaded first.
     Run {
         /// A workflow-world .wasm file or module hash.
         module: String,
@@ -196,8 +196,29 @@ enum Cmd {
         /// Print the workflow id and exit instead of watching.
         #[arg(long)]
         detach: bool,
+        /// v3.4 — stop watching after this many seconds (exit 2; the workflow
+        /// keeps running — scripts need a bound, durable work doesn't).
+        #[arg(long)]
+        timeout: Option<u64>,
         #[command(flatten)]
         conn: client::Conn,
+    },
+    /// One-screen overview: routes, apps and schedules (v3.4).
+    Ls {
+        #[command(flatten)]
+        conn: client::Conn,
+    },
+    /// Remove a /fn/ route binding (the module stays uploaded).
+    Unbind {
+        /// The bound prefix, e.g. /fn/echo.
+        prefix: String,
+        #[command(flatten)]
+        conn: client::Conn,
+    },
+    /// App management (creation is `keel deploy`).
+    Apps {
+        #[command(subcommand)]
+        cmd: AppsCmd,
     },
     /// Tail captured platform-api log lines for a route or app.
     Logs {
@@ -210,6 +231,16 @@ enum Cmd {
         /// Poll for new lines every second (Ctrl-C to stop).
         #[arg(long)]
         follow: bool,
+        #[command(flatten)]
+        conn: client::Conn,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppsCmd {
+    /// Delete an app and its stored assets (ledger history remains).
+    Rm {
+        name: String,
         #[command(flatten)]
         conn: client::Conn,
     },
@@ -316,10 +347,15 @@ async fn main() -> Result<()> {
         Cmd::Bind { prefix, module, fuel, mem_mb, time_ms, rate, name, conn } => {
             client::bind(&conn, &prefix, &module, fuel, mem_mb, time_ms, rate, name.as_deref())
         }
-        Cmd::Run { module, input, detach, conn } => client::run(&conn, &module, &input, detach),
+        Cmd::Run { module, input, detach, timeout, conn } => {
+            client::run(&conn, &module, &input, detach, timeout)
+        }
         Cmd::Logs { r#ref, kind, follow, conn } => {
             client::logs(&conn, &r#ref, kind.as_deref(), follow)
         }
+        Cmd::Ls { conn } => client::ls(&conn),
+        Cmd::Unbind { prefix, conn } => client::unbind(&conn, &prefix),
+        Cmd::Apps { cmd: AppsCmd::Rm { name, conn } } => client::apps_rm(&conn, &name),
     }
 }
 
@@ -552,7 +588,10 @@ async fn serve(
         )
         // Micro-cloud phase 6 — hosted apps (control plane; serving is public
         // below). 64 MiB zip bundles.
-        .route("/api/apps", post(api::create_app))
+        // v3.4 (R.2) — apps finally get GET and DELETE (routes had both
+        // since phase 4; `keel ls` surfaced the asymmetry).
+        .route("/api/apps", post(api::create_app).get(api::list_apps))
+        .route("/api/apps/{name}", axum::routing::delete(api::delete_app))
         .route(
             "/api/apps/{name}/assets",
             post(api::upload_assets).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
@@ -611,6 +650,8 @@ async fn serve(
         .route("/partials/schedules", get(ui::schedules_partial))
         .route("/assets/htmx.min.js", get(ui::htmx_js))
         .route("/assets/style.css", get(ui::style_css))
+        // v3.4 (R.3) — the default browser probe, allowlisted in auth.rs.
+        .route("/favicon.ico", get(ui::favicon))
         // v1.1 — auth. The middleware wraps every route above; /login, /logout
         // and /assets/* are allowlisted inside it. No token configured → no-op.
         .route("/login", get(ui::login_page).post(ui::login_submit))

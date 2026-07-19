@@ -608,26 +608,35 @@ fn run_workflow(shared: &EngineShared, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// v3.4 (R.4) — shared by runner AND function tests: a REAL EngineShared on a
+/// scratch db file. Construction compiles no guests and the provider registry
+/// is empty, so this stays cheap — the fact it works is what unblocked
+/// admit()'s unit tests (status.md §R, the P-FIX-9 hedge).
 #[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
+pub(crate) mod testutil {
     use super::EngineShared;
 
-    /// A real EngineShared on a scratch db — construction compiles no guests
-    /// and the provider registry is empty, so this stays cheap. The wat text
-    /// "(component)" is the smallest valid component (wasmtime's default `wat`
-    /// feature accepts text bytes); cache keys are caller-supplied hashes, so
-    /// one body serves every key.
-    fn test_shared(name: &str, max_compiled: usize) -> EngineShared {
+    pub(crate) fn shared(name: &str, max_compiled: usize) -> EngineShared {
         let db = std::env::temp_dir().join(format!(
-            "keel-runner-test-{name}-{}.db",
+            "keel-test-{name}-{}.db",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&db);
         let mut opts = crate::EngineOptions::new(db.to_string_lossy());
         opts.max_compiled_modules = max_compiled;
         EngineShared::new(opts).expect("test EngineShared")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    /// The wat text "(component)" is the smallest valid component (wasmtime's
+    /// default `wat` feature accepts text bytes); cache keys are caller-
+    /// supplied hashes, so one body serves every key.
+    fn test_shared(name: &str, max_compiled: usize) -> super::EngineShared {
+        super::testutil::shared(name, max_compiled)
     }
 
     fn load_counting(calls: &Cell<u32>) -> impl FnOnce() -> anyhow::Result<Vec<u8>> + '_ {

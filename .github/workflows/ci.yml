@@ -81,6 +81,8 @@ jobs:
         run: ./scripts/accept_cli.sh
       - name: Hardening — caps, sanitized faults, timeouts (v3.3)
         run: ./scripts/accept_harden.sh
+      - name: Polish — ETag/304, API+CLI symmetry, favicon, percentiles (v3.4)
+        run: ./scripts/accept_polish.sh
       - name: Load test — 200 workflows through a cap of 8 (v2.4)
         run: ./scripts/load_test.sh
       - name: Engine log on failure

@@ -77,6 +77,11 @@ impl Conn {
         Self::finish(self.request("POST", path).send_bytes(bytes))
     }
 
+    /// v3.4 — DELETE; a 204 has no body, which finish() maps to Null.
+    fn delete(&self, path: &str) -> Result<Value> {
+        Self::finish(self.request("DELETE", path).call())
+    }
+
     /// Upload a .wasm file to /api/modules → its content hash.
     fn upload_module(&self, path: &str, name: &str) -> Result<String> {
         let wasm = std::fs::read(path).with_context(|| format!("reading {path}"))?;
@@ -145,7 +150,10 @@ pub fn bind(
 
 /// `keel run <file.wasm|hash>` — start a durable workflow and watch it to a
 /// terminal state (exit 0 completed / 1 failed); --detach prints the id only.
-pub fn run(conn: &Conn, module: &str, input: &str, detach: bool) -> Result<()> {
+/// v3.4 (R.2): --timeout N stops WATCHING after N seconds with exit 2 — the
+/// workflow keeps running (durable work outlives the shell; scripts need a
+/// bound anyway).
+pub fn run(conn: &Conn, module: &str, input: &str, detach: bool, timeout: Option<u64>) -> Result<()> {
     let parsed: Value =
         serde_json::from_str(input).with_context(|| format!("--input is not valid JSON: {input}"))?;
     let hash = resolve_module(conn, module, None)?;
@@ -159,8 +167,18 @@ pub fn run(conn: &Conn, module: &str, input: &str, detach: bool) -> Result<()> {
         return Ok(());
     }
     eprintln!("workflow {id}");
+    let deadline = timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
     let mut last_status = String::new();
     loop {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            eprintln!(
+                "timeout: workflow {id} still '{}' — it keeps running; watch again with \
+                 curl {}/api/workflows/{id}",
+                if last_status.is_empty() { "starting" } else { &last_status },
+                conn.server
+            );
+            std::process::exit(2);
+        }
         let wf = conn.get_json(&format!("/api/workflows/{id}"))?;
         let status = wf["status"].as_str().unwrap_or("").to_string();
         if status != last_status {
@@ -311,4 +329,67 @@ fn zip_in_memory(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
         w.write_all(bytes)?;
     }
     Ok(w.finish()?.into_inner())
+}
+
+/// `keel ls` — v3.4 (R.2): one screen of what the engine is serving. Reads
+/// the same three list endpoints curl would (GET /api/routes, /api/apps —
+/// which this stage added — and /api/schedules).
+pub fn ls(conn: &Conn) -> Result<()> {
+    let routes = conn.get_json("/api/routes")?;
+    let apps = conn.get_json("/api/apps")?;
+    let schedules = conn.get_json("/api/schedules")?;
+    let rate = |v: &Value| {
+        if v["rate_limit"].is_null() { "∞".to_string() } else { v["rate_limit"].to_string() }
+    };
+    println!("routes:");
+    for r in routes.as_array().into_iter().flatten() {
+        println!(
+            "  {:<24} {}  fuel {}  time {} ms  rate/min {}",
+            r["prefix"].as_str().unwrap_or("?"),
+            &r["module_hash"].as_str().unwrap_or("")[..12.min(r["module_hash"].as_str().unwrap_or("").len())],
+            r["fuel_limit"],
+            r["time_limit_ms"],
+            rate(r),
+        );
+    }
+    println!("apps:");
+    for a in apps.as_array().into_iter().flatten() {
+        let backend = a["backend_hash"].as_str().unwrap_or("");
+        println!(
+            "  {:<24} {} assets  backend {}  rate/min {}",
+            a["name"].as_str().unwrap_or("?"),
+            a["assets"],
+            if backend.is_empty() { "-" } else { &backend[..12.min(backend.len())] },
+            rate(a),
+        );
+    }
+    println!("schedules:");
+    for s in schedules.as_array().into_iter().flatten() {
+        let when = s["cron"].as_str().map(str::to_string).unwrap_or_else(|| {
+            format!("every {} ms", s["interval_ms"])
+        });
+        println!(
+            "  {:<38} {}  enabled {}",
+            s["id"].as_str().unwrap_or("?"),
+            when,
+            s["enabled"],
+        );
+    }
+    Ok(())
+}
+
+/// `keel unbind /fn/x` — v3.4 (R.2): remove a route binding; the module blob
+/// stays uploaded (content-addressed — rebind by hash any time).
+pub fn unbind(conn: &Conn, prefix: &str) -> Result<()> {
+    conn.delete(&format!("/api/routes{prefix}"))?;
+    println!("unbound {prefix}");
+    Ok(())
+}
+
+/// `keel apps rm <name>` — v3.4 (R.2): delete the app + its assets; ledger
+/// history remains under --retain-ledger-hours.
+pub fn apps_rm(conn: &Conn, name: &str) -> Result<()> {
+    conn.delete(&format!("/api/apps/{name}"))?;
+    println!("removed app '{name}'");
+    Ok(())
 }

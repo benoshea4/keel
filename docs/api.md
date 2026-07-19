@@ -27,7 +27,9 @@ thin clients of exactly these endpoints — anything they do, curl can do.
 | `POST /api/submissions` | Judge a solver against a problem. JSON `{"problem","module_hash"}`, or multipart `problem`+`file` (stores the module first). → 202 `{"id"}`; judging runs off-thread. Per-case quotas: 10⁹ fuel, 256 MiB, 2000 ms. Verdicts: AC · WA · TLE · MLE · OOF · RE; stops at first non-AC; each case writes a `solve` ledger row. |
 | `GET /api/submissions/{id}` | `{"verdict"}` is null while judging; `detail` = per-case JSON (verdict, fuel, peak_mem, ms). |
 | `POST /api/apps` *(phase 6)* | `{"name","backend_hash"?}` → 201 (`rate_limit`? caps the app's api/* backend calls per rolling 60 s, like routes). Name `[a-z0-9-]{1,32}`; no backend = static-only; re-POST re-binds. |
-| `POST /api/apps/{name}/assets` | Body = a zip of the app's `dist/` (64 MiB cap). All-or-nothing: zip-slip entries (`..`, absolute) → 400 with nothing stored; decompressed total capped at 256 MiB (zip bombs → 400). `.wasm`/`.js` content types forced. → `{"stored": N}`. |
+| `GET /api/apps` *(v3.4)* | `[{name, backend_hash, assets, created_at, rate_limit}]` — the listing `keel ls` reads. |
+| `DELETE /api/apps/{name}` *(v3.4)* | App + its stored assets, one transaction → 204 (404 if absent). Ledger rows and captured logs remain — history is `--retain-ledger-hours`'s job. |
+| `POST /api/apps/{name}/assets` | Body = a zip of the app's `dist/` (64 MiB cap). All-or-nothing: zip-slip entries (`..`, absolute) → 400 with nothing stored; decompressed total capped at 256 MiB (zip bombs → 400). `.wasm`/`.js` content types forced. → `{"stored": N}`. v3.4: each asset stores its sha256 as an `ETag`; serving honors `If-None-Match` → 304, hash-named files (`-<12+ hex>.ext`) get `max-age=31536000, immutable`, `index.html` stays `no-store`. |
 | `ANY /apps/{name}/*` *(PUBLIC — no token)* | App serving: `/` → index.html · exact asset (stored content type, `cache-control: no-store`) · `api/*` → the backend function (guest sees the path after `api`) · extensionless → index.html (SPA fallback) · else 404. Bare `/apps/{name}` 301-redirects to `…/` so relative asset URLs resolve. |
 
 ## Workflows

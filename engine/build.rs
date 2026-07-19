@@ -10,4 +10,9 @@ fn main() {
              and commit it (SPEC.md Task 2.8)."
         );
     }
+    // v3.4 (R.3): same self-contained rule for the favicon (status.md §R).
+    println!("cargo:rerun-if-changed=assets/favicon.ico");
+    if !std::path::Path::new("assets/favicon.ico").exists() {
+        panic!("engine/assets/favicon.ico is missing — it is committed; restore it from git.");
+    }
 }

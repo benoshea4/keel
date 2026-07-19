@@ -49,6 +49,19 @@ pub async fn style_css() -> impl axum::response::IntoResponse {
     )
 }
 
+/// v3.4 (R.3): the browser's default probe — served for real instead of
+/// 404ing on every page view. Long cache: the icon is embedded in the binary,
+/// so it changes at most once per deploy.
+pub async fn favicon() -> impl axum::response::IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_bytes!("../assets/favicon.ico").as_slice(),
+    )
+}
+
 // --- display-ready view rows ----------------------------------------------------
 
 struct WfRow {
@@ -656,10 +669,20 @@ struct UsageRow {
     ms: i64,
 }
 
+/// v3.4 (R.5) — latency percentiles per ref, straight off the ledger.
+struct LatRow {
+    kind: String,
+    refname: String,
+    p50: i64,
+    p95: i64,
+    p99: i64,
+}
+
 #[derive(Template)]
 #[template(path = "_usage_table.html")]
 struct UsageTable {
     totals: Vec<TotalRow>,
+    lat: Vec<LatRow>,
     rows: Vec<UsageRow>,
 }
 
@@ -770,6 +793,18 @@ pub async fn usage_partial(
             fuel,
         })
         .collect();
+    // v3.4 (R.5) — same numbers /metrics exports; the page just shows them.
+    let lat = db::duration_percentiles(&conn)
+        .map_err(internal)?
+        .into_iter()
+        .map(|(kind, refname, p50, p95, p99)| LatRow {
+            kind,
+            refname,
+            p50,
+            p95,
+            p99,
+        })
+        .collect();
     let rows = db::recent_invocations(&conn)
         .map_err(internal)?
         .into_iter()
@@ -786,7 +821,7 @@ pub async fn usage_partial(
             ms: r.duration_ms,
         })
         .collect();
-    render(UsageTable { totals, rows })
+    render(UsageTable { totals, lat, rows })
 }
 
 // --- Micro-cloud phase 6: apps ------------------------------------------------------

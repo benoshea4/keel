@@ -268,16 +268,83 @@ const APP_QUOTA: Quota = Quota {
     time_ms: 5000,
 };
 
-fn asset_response(content_type: &str, bytes: Vec<u8>) -> Response {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
-            // Dev platform: no cache-invalidation puzzles, ever.
-            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
-        ],
-        bytes,
-    )
-        .into_response()
+/// v3.4 (R.1): a filename is treated as content-hashed (immutable for a
+/// year) when its stem ends in `-<12+ hex chars>` — trunk's output pattern —
+/// or IS 12+ bare hex (a file literally named by its hash). 12+ so a human
+/// name like `part-deadbeef.js` (8) never gets wrongly frozen; a missed hash
+/// merely falls back to revalidation, which is always correct.
+fn hash_named(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+    let tail = stem.rsplit('-').next().unwrap_or("");
+    tail.len() >= 12 && tail.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// v3.4 (R.1): cache policy per asset class —
+///   index.html          → no-store (the upgrade lever: never cache the entry
+///                         point, or a re-deploy can't reach the browser)
+///   name-<hex>.ext      → public, max-age=1y, immutable (a new build is a
+///                         new URL — trunk content-hashes its output)
+///   everything else     → no-cache + ETag: browsers may store but must
+///                         revalidate, and the 304 makes that ~free.
+/// The ETag is the stored sha256; If-None-Match matching is a contains-check
+/// on the hex (quote/weak-prefix agnostic — 64 hex chars can't false-match).
+fn asset_response(
+    path: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+    etag: Option<String>,
+    if_none_match: Option<&str>,
+) -> Response {
+    if path == "index.html" {
+        return (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+                (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            bytes,
+        )
+            .into_response();
+    }
+    let cache_control = if hash_named(path) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    match etag {
+        // Pre-v3.4 row (etag NULL): unconditional 200, revalidation-only
+        // policy — heals on next upload.
+        None => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+                (axum::http::header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Some(tag) => {
+            let quoted = format!("\"{tag}\"");
+            if if_none_match.is_some_and(|inm| inm.contains(tag.as_str())) {
+                return (
+                    StatusCode::NOT_MODIFIED,
+                    [
+                        (axum::http::header::ETAG, quoted),
+                        (axum::http::header::CACHE_CONTROL, cache_control.to_string()),
+                    ],
+                )
+                    .into_response();
+            }
+            (
+                [
+                    (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+                    (axum::http::header::CACHE_CONTROL, cache_control.to_string()),
+                    (axum::http::header::ETAG, quoted),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+    }
 }
 
 /// ANY /apps/{*full} — serve a hosted app (ext spec Task 6.1):
@@ -318,9 +385,22 @@ pub async fn serve_app(State(shared): State<Arc<EngineShared>>, req: Request) ->
             }
             Err(e) => return internal_error("app lookup", format!("{e:#}")),
         };
+        // v3.4 (R.1): the conditional-GET header, plucked once (extract_raw
+        // lowercases header names via the http crate's normalization).
+        let if_none_match = raw
+            .headers
+            .iter()
+            .find(|(n, _)| n == "if-none-match")
+            .map(|(_, v)| v.clone());
         let serve_asset = |conn: &keel_core::rusqlite::Connection, path: &str| {
             match db::get_asset(conn, &name, path) {
-                Ok(Some((ct, bytes))) => Some(asset_response(&ct, bytes)),
+                Ok(Some((ct, bytes, etag))) => Some(asset_response(
+                    path,
+                    &ct,
+                    bytes,
+                    etag,
+                    if_none_match.as_deref(),
+                )),
                 Ok(None) => None,
                 Err(e) => Some(internal_error("asset read", format!("{e:#}"))),
             }
